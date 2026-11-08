@@ -13,7 +13,45 @@ const IOS_EMBEDDED_FRAMEWORKS: Array = [  ]
 const IOS_LINKER_FLAGS: Array = [ "-ObjC" ]
 const IOS_BUNDLE_FILES: Array = [  ]
 const SPM_DEPENDENCIES: Array = [  ]
+const TOOL_MENU_BUILD_XR = "Build Android XR"
+const TOOL_MENU_BUILD = "Build Android"
+const TOOL_MENU_BUILD_BOTH = "Build Android (All)"
+const TOOL_MENU_BUILD_LINUX = "Build Linux"
+const TOOL_MENU_BUILD_WINDOWS = "Build Windows"
+const TOOL_MENU_BUILD_ALL = "Build All"
+const TOOL_MENU_BUILD_CREATOR_ANDROID = "Build Creator Android"
 
+const BUILD_PARALLELISM = 32
+
+const PRESET_XR = "Client Android XR APK"
+const PRESET_FLAT = "Client Android APK"
+const PRESET_LINUX = "Client Linux"
+const PRESET_WINDOWS = "Client Windows"
+const PRESET_CREATOR_ANDROID = "Creator Android APK"
+
+const PRESET_INFO = {
+	PRESET_XR:               { "dir": "android-build", "ext": ".apk",    "suffix": "-XR" },
+	PRESET_FLAT:             { "dir": "android-build", "ext": ".apk",    "suffix": "" },
+	PRESET_LINUX:            { "dir": "linux-build",   "ext": ".x86_64", "suffix": "-Linux" },
+	PRESET_WINDOWS:          { "dir": "windows-build", "ext": ".exe",    "suffix": "-Windows" },
+	PRESET_CREATOR_ANDROID:  { "dir": "android-build", "ext": ".apk",    "suffix": "-Creator" },
+}
+
+const ANDROID_RID = "linux-bionic-arm64"
+const LINUX_RID = "linux-x64"
+const WINDOWS_RID = "win-x64"
+const CSPROJ_RES_PATH = "res://Polytoria.csproj"
+const PUBLISH_OUT_REL = "res://.godot/mono/temp/bin/ExportDebug/linux-bionic-arm64/publish/Polytoria.so"
+const GRADLE_LIBS_REL = "res://android/build/libs/debug/arm64-v8a/"
+
+const PRESET_AOT = {
+	PRESET_LINUX:   { "rid": LINUX_RID,   "platform": "linuxbsd", "data_dir": "data_Polytoria_linuxbsd_x86_64", "bin_name": "Polytoria.so",  "config": "ExportRelease" },
+	PRESET_WINDOWS: { "rid": WINDOWS_RID, "platform": "windows",  "data_dir": "data_Polytoria_windows_x86_64", "bin_name": "Polytoria.dll", "config": "ExportRelease" },
+}
+# I am aware its sort of stupid to just use WSL when some people might just not have WSL, or the specific distro/setup, or maybe not even be on Windows,
+# but i doubt anyone will try to build the Linux client themselves, hopefully nobody does because it wont work.
+const WSL_DISTRO = "Ubuntu-24.04"
+const WSL_DOTNET_HOME = "$HOME/.dotnet10"
 var android_export_plugin: AndroidExportPlugin
 var ios_export_plugin: IosExportPlugin
 
