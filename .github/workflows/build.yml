@@ -1,0 +1,336 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+
+env:
+  GODOT_VERSION: "4.7.0"
+  DOTNET_VERSION: "10.0.x"
+  ANDROID_NDK_VERSION: "r29"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  DOTNET_NOLOGO: "true"
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows Client
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Setup Godot
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: ${{ env.GODOT_VERSION }}
+          use-dotnet: true
+          include-templates: true
+          cache: true
+
+      - name: Export
+        run: |
+          cd Polytoria
+          VERSION=$(grep -m1 '^config/version=' project.godot | cut -d'"' -f2)
+          cp export_presets.cfg.template export_presets.cfg
+          OUT="$GITHUB_WORKSPACE/out/windows-build"
+          mkdir -p "$OUT"
+          dotnet restore
+          godot --headless --verbose --build-solutions --quit
+          godot --headless --path . --export-debug "Client Windows" "$OUT/PolyDroid3-${VERSION}-Windows.exe"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: PolyDroid3-Windows
+          path: out/windows-build
+
+  linux:
+    name: Linux Client
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install AOT tools
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Setup Godot
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: ${{ env.GODOT_VERSION }}
+          use-dotnet: true
+          include-templates: true
+          cache: true
+
+      - name: Export
+        run: |
+          cd Polytoria
+          VERSION=$(grep -m1 '^config/version=' project.godot | cut -d'"' -f2)
+          cp export_presets.cfg.template export_presets.cfg
+          OUT="$GITHUB_WORKSPACE/out/linux-build"
+          mkdir -p "$OUT"
+          dotnet restore
+          godot --headless --verbose --build-solutions --quit
+          godot --headless --path . --export-debug "Client Linux" "$OUT/PolyDroid3-${VERSION}-Linux.x86_64"
+          cp -r Polytoria/data_Polytoria_linuxbsd_x86_64 "$OUT/" 2>/dev/null || true
+          cp -r Polytoria/.godot/mono/temp/bin/Debug/*.dll "$OUT/" 2>/dev/null || true
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: PolyDroid3-Linux
+          path: out/linux-build
+
+  android:
+    name: Android Client
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.ANDROID_NDK_VERSION }}
+
+      - name: Setup Godot
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: ${{ env.GODOT_VERSION }}
+          use-dotnet: true
+          include-templates: true
+          cache: true
+
+      - name: Generate debug key
+        run: |
+          mkdir -p ~/.android
+          keytool -genkeypair -keystore ~/.android/debug.keystore -storepass android \
+            -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Export APK
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ github.workspace }}/.android-keystore/debug.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+        run: |
+          mkdir -p "$(dirname "$GODOT_ANDROID_KEYSTORE_DEBUG_PATH")"
+          cp ~/.android/debug.keystore "$GODOT_ANDROID_KEYSTORE_DEBUG_PATH"
+          export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          cd Polytoria
+          VERSION=$(grep -m1 '^config/version=' project.godot | cut -d'"' -f2)
+          cp export_presets.cfg.template export_presets.cfg
+          OUT="$GITHUB_WORKSPACE/out/android-build"
+          mkdir -p "$OUT"
+          dotnet restore
+          godot --headless --verbose --build-solutions --quit
+          dotnet publish Polytoria.csproj -c ExportDebug -r linux-bionic-arm64 -p:GodotTargetPlatform=android --self-contained
+          ANDROID_SRC=$(find "$HOME" -name android_source.zip -path '*export_templates*' 2>/dev/null | head -1)
+          mkdir -p android/build
+          unzip -o -q "$ANDROID_SRC" -d android/build/
+          mkdir -p android/build/libs/debug/arm64-v8a
+          cp .godot/mono/temp/bin/ExportDebug/linux-bionic-arm64/publish/Polytoria.so android/build/libs/debug/arm64-v8a/Polytoria.so
+          godot --headless --path . --export-debug "Client Android APK" "$OUT/PolyDroid3-${VERSION}.apk"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: PolyDroid3-Android
+          path: out/android-build
+
+  android-creator:
+    name: Android Creator
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.ANDROID_NDK_VERSION }}
+
+      - name: Setup Godot
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: ${{ env.GODOT_VERSION }}
+          use-dotnet: true
+          include-templates: true
+          cache: true
+
+      - name: Generate debug key
+        run: |
+          mkdir -p ~/.android
+          keytool -genkeypair -keystore ~/.android/debug.keystore -storepass android \
+            -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Export Creator APK
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ github.workspace }}/.android-keystore/debug.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+        run: |
+          mkdir -p "$(dirname "$GODOT_ANDROID_KEYSTORE_DEBUG_PATH")"
+          cp ~/.android/debug.keystore "$GODOT_ANDROID_KEYSTORE_DEBUG_PATH"
+          export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          cd Polytoria
+          VERSION=$(grep -m1 '^config/version=' project.godot | cut -d'"' -f2)
+          cp export_presets.cfg.template export_presets.cfg
+          OUT="$GITHUB_WORKSPACE/out/android-build"
+          mkdir -p "$OUT"
+          dotnet restore
+          godot --headless --verbose --build-solutions --quit
+          dotnet publish Polytoria.csproj -c ExportDebug -r linux-bionic-arm64 -p:GodotTargetPlatform=android --self-contained
+          ANDROID_SRC=$(find "$HOME" -name android_source.zip -path '*export_templates*' 2>/dev/null | head -1)
+          mkdir -p android/build
+          unzip -o -q "$ANDROID_SRC" -d android/build/
+          mkdir -p android/build/libs/debug/arm64-v8a
+          cp .godot/mono/temp/bin/ExportDebug/linux-bionic-arm64/publish/Polytoria.so android/build/libs/debug/arm64-v8a/Polytoria.so
+          godot --headless --path . --export-debug "Creator Android APK" "$OUT/PolyDroid3-${VERSION}-Creator.apk"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: PolyDroid3-Creator-Android
+          path: out/android-build
+
+  ios:
+    name: iOS Client
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Select latest Xcode
+        run: |
+          ls -d /Applications/Xcode_*.app
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          xcodebuild -version
+          echo "iphoneos SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install iOS workload
+        run: dotnet workload install ios
+
+      - name: Setup Godot
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: ${{ env.GODOT_VERSION }}
+          use-dotnet: true
+          include-templates: true
+          cache: true
+
+      - name: Publish iOS libs
+        run: |
+          cd Polytoria
+          dotnet restore
+          godot --headless --verbose --build-solutions --quit
+          dotnet publish Polytoria.csproj -c ExportDebug -r ios-arm64 -p:GodotTargetPlatform=ios --self-contained
+
+      - name: Export Xcode project
+        continue-on-error: true
+        run: |
+          cd Polytoria
+          cp export_presets.cfg.template export_presets.cfg
+          OUT="$GITHUB_WORKSPACE/out/ios-build"
+          mkdir -p "$OUT"
+          godot --headless --path . --export-debug "Client iOS" "$OUT/PolyDroid3-iOS.ipa"
+
+      - name: Build and package .ipa
+        run: |
+          VERSION=$(grep -m1 '^config/version=' "$GITHUB_WORKSPACE/Polytoria/project.godot" | cut -d'"' -f2)
+          cd "$GITHUB_WORKSPACE/out/ios-build"
+          project=$(ls -d *.xcodeproj 2>/dev/null | head -1)
+          if [ -z "$project" ]; then
+            echo "Godot didn't generate an Xcode project! export step failed." >&2
+            exit 1
+          fi
+          name=$(basename "$project" .xcodeproj)
+          xcodebuild -project "$project" -target "$name" -configuration Debug -sdk iphoneos \
+            CONFIGURATION_BUILD_DIR="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" CODE_SIGN_ENTITLEMENTS=""
+          app=$(find build -name '*.app' -type d | head -1)
+          if [ -z "$app" ]; then
+            echo "xcodebuild produced no .app!" >&2
+            exit 1
+          fi
+          rm -rf Payload ipa
+          mkdir -p Payload ipa
+          cp -R "$app" Payload/
+          zip -r -y "ipa/PolyDroid3-${VERSION}-iOS-experimental.ipa" Payload
+          rm -rf Payload
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: PolyDroid3-iOS
+          path: out/ios-build/ipa
