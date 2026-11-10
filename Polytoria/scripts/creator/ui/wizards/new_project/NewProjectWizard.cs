@@ -105,14 +105,7 @@ public partial class NewProjectWizard : Control
 		try
 		{
 			_projectNameEdit.Text = DefaultProjectName;
-			string docs;
-			try { docs = System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments); }
-			catch { docs = ""; }
-			if (string.IsNullOrEmpty(docs))
-			{
-				docs = ProjectSettings.GlobalizePath("user://");
-			}
-			_projectPathEdit.Text = Path.Join(docs, CreatorService.PolytoriaFolderName, DefaultProjectName).SanitizePath();
+			_projectPathEdit.Text = Path.Join(CreatorService.DocumentsFolder, CreatorService.PolytoriaFolderName, DefaultProjectName).SanitizePath();
 		}
 		catch (Exception ex)
 		{

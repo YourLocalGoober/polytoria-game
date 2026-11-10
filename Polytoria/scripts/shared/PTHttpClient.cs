@@ -18,10 +18,15 @@ namespace Polytoria.Shared;
 
 public partial class PTHttpClient
 {
-	private const int DefaultDownloadChunkSize = 10000;
+	private const int DefaultDownloadChunkSize = 65536;
 	private const double RequestTimeoutSeconds = 30.0;
 #if USE_NATIVE_HTTP
-	private static readonly HttpClient _httpClient = new();
+	private static readonly HttpClient _httpClient = new(
+		new HttpClientHandler
+		{
+			AllowAutoRedirect = false
+		}
+	);
 #endif
 	public Dictionary<string, string> DefaultRequestHeaders { get; set; } = [];
 
@@ -73,6 +78,7 @@ public partial class PTHttpClient
 					{
 						DownloadChunkSize = DefaultDownloadChunkSize,
 						Timeout = RequestTimeoutSeconds,
+						MaxRedirects = 0,
 					};
 
 					Globals.Singleton.AddChild(req);

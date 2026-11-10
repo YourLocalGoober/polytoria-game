@@ -11,6 +11,18 @@ public static class SharedSettingsRegistry
 {
 	public static readonly IReadOnlyDictionary<string, SettingDef> Definitions = Build();
 
+	public static bool IsSupported(string key) => Definitions[key].IsSupported;
+
+	private static bool IsForwardPlus()
+	{
+		return !Globals.IsMobileBuild && Globals.RenderingMethod == "forward_plus";
+	}
+
+	private static bool SupportsSsao()
+	{
+		return !Globals.IsMobileBuild && Globals.RenderingMethod != "mobile";
+	}
+
 	public static void AddSharedTo(Dictionary<string, SettingDef> target)
 	{
 		foreach (var pair in Definitions)
@@ -193,6 +205,26 @@ public static class SharedSettingsRegistry
 				}
 			},
 			{
+				SharedSettingKeys.Graphics.ScreenSpaceAA,
+				new SettingDef<ScreenSpaceAAOption>
+				{
+					Key = SharedSettingKeys.Graphics.ScreenSpaceAA,
+					SupportedPredicate = () => Globals.RenderingMethod != "gl_compatibility",
+					SectionKey = "graphics",
+					Label = "Screen Space AA",
+					Description = "Screen space antialiasing.",
+					ValueKind = SettingValueKind.Enum,
+					ControlKind = SettingControlKind.Dropdown,
+					DefaultValue = ScreenSpaceAAOption.Off,
+					Options =
+					[
+						new() { Value = ScreenSpaceAAOption.Off, Label = "Off" },
+						new() { Value = ScreenSpaceAAOption.Fxaa, Label = "FXAA" },
+						new() { Value = ScreenSpaceAAOption.Smaa, Label = "SMAA" },
+					]
+				}
+			},
+			{
 				SharedSettingKeys.Graphics.ShadowQuality,
 				new SettingDef<ShadowQuality>
 				{
@@ -234,6 +266,7 @@ public static class SharedSettingsRegistry
 				new SettingDef<bool>
 				{
 					Key = SharedSettingKeys.PostProcessing.Glow,
+					SupportedPredicate = () => !Globals.IsMobileBuild,
 					SectionKey = "post_processing",
 					Label = "Glow",
 					Description = "Toggle glow/bloom effect.",
@@ -247,6 +280,7 @@ public static class SharedSettingsRegistry
 				new SettingDef<bool>
 				{
 					Key = SharedSettingKeys.PostProcessing.Ssao,
+					SupportedPredicate = SupportsSsao,
 					SectionKey = "post_processing",
 					Label = "SSAO",
 					Description = "Toggle ambient occlusion effect.",
@@ -262,6 +296,7 @@ public static class SharedSettingsRegistry
 				new SettingDef<bool>
 				{
 					Key = SharedSettingKeys.PostProcessing.Ssr,
+					SupportedPredicate = IsForwardPlus,
 					SectionKey = "post_processing",
 					Label = "SSR",
 					Description = "Toggle screen-space reflections.",
@@ -277,6 +312,7 @@ public static class SharedSettingsRegistry
 				new SettingDef<bool>
 				{
 					Key = SharedSettingKeys.PostProcessing.Ssil,
+					SupportedPredicate = IsForwardPlus,
 					SectionKey = "post_processing",
 					Label = "SSIL",
 					Description = "Toggle screen-space illuminated lighting.",
@@ -361,10 +397,31 @@ public static class SharedSettingsRegistry
 				}
 			},
 			{
+				SharedSettingKeys.PostProcessing.EffectsQuality,
+				new SettingDef<EffectsQualityOption>
+				{
+					Key = SharedSettingKeys.PostProcessing.EffectsQuality,
+					SupportedPredicate = SupportsSsao,
+					SectionKey = "post_processing",
+					Label = "Effects Quality",
+					Description = "SSAO, SSIL and SSR quality level.",
+					ValueKind = SettingValueKind.Enum,
+					ControlKind = SettingControlKind.Dropdown,
+					DefaultValue = EffectsQualityOption.Medium,
+					Options =
+					[
+						new() { Value = EffectsQualityOption.Low, Label = "Low" },
+						new() { Value = EffectsQualityOption.Medium, Label = "Medium" },
+						new() { Value = EffectsQualityOption.High, Label = "High" },
+					]
+				}
+			},
+			{
 				SharedSettingKeys.PostProcessing.Sdfgi,
 				new SettingDef<bool>
 				{
 					Key = SharedSettingKeys.PostProcessing.Sdfgi,
+					SupportedPredicate = IsForwardPlus,
 					SectionKey = "post_processing",
 					Label = "SDFGI",
 					Description = "Toggle SDFGI (semi-real-time global illumination) effect.",
@@ -380,7 +437,8 @@ public static class SharedSettingsRegistry
 				new SettingDef<bool>
 				{
 					Key = SharedSettingKeys.PostProcessing.NormalMaps,
-					SectionKey = "graphics",
+					SupportedPredicate = () => !Globals.IsMobileBuild,
+					SectionKey = "post_processing",
 					Label = "Normal Maps",
 					Description = "Toggle normal maps on part materials.",
 					ValueKind = SettingValueKind.Bool,
@@ -393,6 +451,7 @@ public static class SharedSettingsRegistry
 				new SettingDef<float>
 				{
 					Key = SharedSettingKeys.PostProcessing.SdfgiCellSize,
+					SupportedPredicate = IsForwardPlus,
 					IsAdvanced = true,
 					SectionKey = "post_processing",
 					Label = "SDFGI Cell Size",
@@ -411,6 +470,7 @@ public static class SharedSettingsRegistry
 				new SettingDef<int>
 				{
 					Key = SharedSettingKeys.PostProcessing.SdfgiCascades,
+					SupportedPredicate = IsForwardPlus,
 					IsAdvanced = true,
 					SectionKey = "post_processing",
 					Label = "SDFGI Cascades",
@@ -429,6 +489,7 @@ public static class SharedSettingsRegistry
 				new SettingDef<float>
 				{
 					Key = SharedSettingKeys.PostProcessing.SsilRadius,
+					SupportedPredicate = IsForwardPlus,
 					IsAdvanced = true,
 					SectionKey = "post_processing",
 					Label = "SSIL Radius",
@@ -453,11 +514,11 @@ public static class SharedSettingsRegistry
 					ValueKind = SettingValueKind.Int,
 					ControlKind = SettingControlKind.Dropdown,
 					RequiresRestart = true,
-					DefaultValue = 5,
+					DefaultValue = 15,
 					Options =
 					[
-						new() { Value = 5, Label = "Default (5)" },
-						new() { Value = 15, Label = "Fast (15)" },
+						new() { Value = 5, Label = "Lowend (5)" },
+						new() { Value = 15, Label = "Default (15)" },
 						new() { Value = 30, Label = "Aggressive (30)" },
 						new() { Value = 60, Label = "SPEED (60)" },
 					]

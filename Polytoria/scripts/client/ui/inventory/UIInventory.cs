@@ -64,7 +64,7 @@ public partial class UIInventory : Control
 
 	public void OpenBackpack()
 	{
-		if (!CoreUI.Service.UseBackpack) return;
+		if (IsBackpackOpened || !CoreUI.Service.UseBackpack) return;
 		IsBackpackOpened = true;
 		_backpackAnim.Stop();
 		_backpackAnim.Play("appear");
@@ -72,7 +72,7 @@ public partial class UIInventory : Control
 
 	public void CloseBackpack()
 	{
-		if (!CoreUI.Service.UseBackpack) return;
+		if (!IsBackpackOpened) return;
 		IsBackpackOpened = false;
 		_backpackAnim.Stop();
 		_backpackAnim.Play("disappear");
@@ -143,6 +143,7 @@ public partial class UIInventory : Control
 	{
 		if (!Visible) return;
 		if (@event.IsEcho()) return;
+		if (CoreUI.Root.Input.IsPromptKey(@event)) return;
 		if (@event.IsActionPressed("toggle_backpack"))
 		{
 			ToggleBackpack();
@@ -154,6 +155,7 @@ public partial class UIInventory : Control
 	{
 		if (!Visible) return;
 		if (@event.IsEcho()) return;
+		if (CoreUI.Root.Input.IsPromptKey(@event)) return;
 		if (@event is InputEventKey key)
 		{
 			if (!key.Pressed) { return; }

@@ -24,67 +24,96 @@ public partial class NetMessage : IScriptObject
 	public Dictionary<string, Vector3> Vec3s = [];
 	public Dictionary<string, Color> Colors = [];
 	public Dictionary<string, Quaternion> Quaternions = [];
+	public Dictionary<string, Variant> Variants = [];
 	public Dictionary<string, Instance> Instances = [];
 	public Dictionary<string, byte[]> Buffers = [];
 
 	[ScriptMethod]
-	public void AddString(string key, string value)
+	public NetMessage AddString(string key, string value)
 	{
 		Strings.Add(key, value);
+
+		return this;
 	}
 
 	[ScriptMethod]
-	public void AddInt(string key, int value)
+	public NetMessage AddInt(string key, int value)
 	{
 		Ints.Add(key, value);
+
+		return this;
 	}
 
 	[ScriptMethod]
-	public void AddBool(string key, bool value)
+	public NetMessage AddBool(string key, bool value)
 	{
 		Bools.Add(key, value);
+
+		return this;
 	}
 
 	[ScriptMethod]
-	public void AddNumber(string key, float value)
+	public NetMessage AddNumber(string key, float value)
 	{
 		Numbers.Add(key, value);
+
+		return this;
 	}
 
 	[ScriptMethod]
-	public void AddVector2(string key, Vector2 value)
+	public NetMessage AddVector2(string key, Vector2 value)
 	{
 		Vec2s.Add(key, value);
+
+		return this;
 	}
 
 	[ScriptMethod]
-	public void AddVector3(string key, Vector3 value)
+	public NetMessage AddVector3(string key, Vector3 value)
 	{
 		Vec3s.Add(key, value);
+
+		return this;
 	}
 
 	[ScriptMethod]
-	public void AddColor(string key, Color value)
+	public NetMessage AddColor(string key, Color value)
 	{
 		Colors.Add(key, value);
+
+		return this;
 	}
 
 	[ScriptMethod]
-	public void AddQuaternion(string key, Quaternion value)
+	public NetMessage AddQuaternion(string key, Quaternion value)
 	{
 		Quaternions.Add(key, value);
+
+		return this;
 	}
 
 	[ScriptMethod]
-	public void AddInstance(string key, Instance value)
+	public NetMessage AddVariant(string key, Variant value)
+	{
+		Variants.Add(key, value);
+
+		return this;
+	}
+
+	[ScriptMethod]
+	public NetMessage AddInstance(string key, Instance value)
 	{
 		Instances.Add(key, value);
+
+		return this;
 	}
 
 	[ScriptMethod]
-	public void AddBuffer(string key, byte[] buffer)
+	public NetMessage AddBuffer(string key, byte[] buffer)
 	{
 		Buffers.Add(key, buffer);
+
+		return this;
 	}
 
 	[ScriptMethod]
@@ -110,6 +139,9 @@ public partial class NetMessage : IScriptObject
 
 	[ScriptMethod]
 	public Quaternion? GetQuaternion(string key) => Quaternions.TryGetValue(key, out var value) ? value : (Quaternion?)null;
+
+	[ScriptMethod]
+	public Variant? GetVariant(string key) => Variants.TryGetValue(key, out var value) ? value : (Variant?)null;
 
 	[ScriptMethod]
 	public Instance? GetInstance(string key) => Instances.TryGetValue(key, out var value) ? value : null;
@@ -147,7 +179,11 @@ public partial class NetMessage : IScriptObject
 		}
 		foreach ((string key, Quaternion q) in Quaternions)
 		{
-			payload.Quaternions[key] = new UnitQuaternionUInt64Dto(q);
+			payload.Quaternions[key] = new UnitQuaternionDto(q);
+		}
+		foreach ((string key, Variant v) in Variants)
+		{
+			payload.Variants[key] = new VariantDto(v);
 		}
 		foreach ((string key, Instance i) in Instances)
 		{
@@ -179,9 +215,13 @@ public partial class NetMessage : IScriptObject
 		{
 			msg.Colors[key] = c.ToColor();
 		}
-		foreach ((string key, UnitQuaternionUInt64Dto q) in payload.Quaternions)
+		foreach ((string key, UnitQuaternionDto q) in payload.Quaternions)
 		{
 			msg.Quaternions[key] = q.ToQuaternion();
+		}
+		foreach ((string key, VariantDto v) in payload.Variants)
+		{
+			msg.Variants[key] = v.ToVariant();
 		}
 		foreach ((string key, string netID) in payload.Instances)
 		{
@@ -204,7 +244,8 @@ public partial class NetMessage : IScriptObject
 		public Dictionary<string, Vector2Dto> Vec2s = [];
 		public Dictionary<string, Vector3Dto> Vec3s = [];
 		public Dictionary<string, ColorDto> Colors = [];
-		public Dictionary<string, UnitQuaternionUInt64Dto> Quaternions = [];
+		public Dictionary<string, UnitQuaternionDto> Quaternions = [];
+		public Dictionary<string, VariantDto> Variants = [];
 		public Dictionary<string, string> Instances = [];
 		public Dictionary<string, byte[]> Buffers = [];
 	}

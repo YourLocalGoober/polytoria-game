@@ -29,21 +29,26 @@ public sealed partial class Gizmos : Node
 	private bool _isMouseDragging;
 	private bool _isDraggingDyn;
 	private bool _isDragPending;
+	private Dynamic? _reselectTarget;
+	private Dynamic? _dragTarget;
 	private Vector2 _dragStartPos;
 	private const float DragThreshold = 8f;
-	private Dynamic? _lastHovered;
+	private const float TapSlop = 16f;
+	private bool _tapPending;
+	private bool _touchPointer;
 	private SelectionBox _paintBox = null!;
 	private SelectionBox _hoverBox = null!;
 
 	public bool HoveringGizmos { get; set; }
 	public bool HoveringUIGizmo { get; set; }
+	public bool HoveringObject => _hoverBox.Target != null;
 	public bool IsDraggingDynamic => _isDraggingDyn;
 
-	public static Color[] AxisColors { get; private set; } =
+	public static readonly Color[] AxisColors =
 	[
-			new(0.96f, 0.20f, 0.32f),
-			new(0.53f, 0.84f, 0.01f),
-			new(0.16f, 0.55f, 0.96f),
+		new(0.96f, 0.20f, 0.32f),
+		new(0.53f, 0.84f, 0.01f),
+		new(0.16f, 0.55f, 0.96f),
 	];
 
 	public MoveGizmo Move = new();
@@ -67,12 +72,12 @@ public sealed partial class Gizmos : Node
 		game.Loaded.Once(() =>
 		{
 			_history = Root.CreatorContext.History;
+			_camera = Root.CreatorContext.Freelook.Camera3D;
 		});
 	}
 
 	public override void _Ready()
 	{
-		_camera = Root.CreatorContext.Freelook.Camera3D;
 		Move.RootGizmos = this;
 		Rotate.RootGizmos = this;
 		Scale.RootGizmos = this;
@@ -133,7 +138,6 @@ public sealed partial class Gizmos : Node
 
 		Vector3 oldScaleVector = _pivotStart.Basis[column];
 		Vector3 currentAxisVector = oldScaleVector * globalDirection;
-		int localDirection = rawMotion.Dot(currentAxisVector) > 0 ? 1 : -1;
 
 		Vector3 axisDir = currentAxisVector.Normalized();
 		float snappedDelta = Mathf.Snapped(rawMotion.Dot(axisDir), moveSnap);
@@ -162,7 +166,7 @@ public sealed partial class Gizmos : Node
 				newBasis[i] = newScaleVector;
 				if (!isAltPressed)
 				{
-					totalOriginOffset += (globalDirection * snappedDelta * _pivotStart.Basis[i].Normalized() / 2);
+					totalOriginOffset += globalDirection * snappedDelta * _pivotStart.Basis[i].Normalized() / 2;
 				}
 			}
 			else if (isShiftPressed)
@@ -307,6 +311,49 @@ public sealed partial class Gizmos : Node
 		CommitHistorySelectedTransform();
 	}
 
+	private bool _wasDraggingDyn;
+	private bool _wasDraggingMove;
+
+	public void PauseDrag()
+	{
+		_wasDraggingDyn = _isDragPending || _isDraggingDyn;
+		_wasDraggingMove = Move.IsDragging;
+
+		if (_isDraggingDyn)
+		{
+			_isDraggingDyn = false;
+			CommitHistorySelectedTransform();
+		}
+		_isDragPending = false;
+		DragSelected.Clear();
+		_dragTarget = null;
+
+		if (_wasDraggingMove)
+		{
+			CommitHistorySelectedTransform();
+		}
+	}
+
+	public void ResumeDrag()
+	{
+		if (Selected.Count == 0) return;
+
+		if (_wasDraggingDyn)
+		{
+			DragSelected.AddRange(Selected);
+			_dragTarget = Selected[0];
+			_isDraggingDyn = true;
+			_history.NewAction("Drag Transform");
+			RecordHistoryUndo();
+		}
+
+		if (_wasDraggingMove)
+		{
+			Move.ResetDragOrigin();
+			OnMoveDragStarted();
+		}
+	}
+
 	private void OnMoveDragStarted()
 	{
 		Polytoria.Shared.Globals.GizmoDragging = true;
@@ -335,6 +382,12 @@ public sealed partial class Gizmos : Node
 
 	private void CommitHistorySelectedTransform()
 	{
+		if (Selected.Count == 0)
+		{
+			_history.CancelAction();
+			return;
+		}
+
 		foreach (Dynamic item in Selected)
 		{
 			Transform3D t = item.GetGlobalTransform();
@@ -428,9 +481,17 @@ public sealed partial class Gizmos : Node
 		return topModel;
 	}
 
+	public static bool IsJoystickPointer(Viewport viewport, InputEvent @event)
+	{
+		if (@event is not InputEventMouse mouse || mouse.Device != InputEvent.DeviceIdEmulation) return false;
+		if (Polytoria.Client.UI.Touch.JoystickArea.HeldIndex == 0) return true;
+		return mouse is InputEventMouseButton { Pressed: true } && Polytoria.Client.UI.Touch.JoystickArea.Covers(viewport, mouse.Position);
+	}
+
 	public override void _Input(InputEvent @event)
 	{
 		if (!Root.CreatorContext.IsViewportFocused) { return; }
+		if (IsJoystickPointer(GetViewport(), @event)) { return; }
 		ToolModeEnum toolMode = CreatorService.Interface.ToolMode;
 
 		Vector2 mousePos = _camera.GetViewport().GetMousePosition();
@@ -448,21 +509,26 @@ public sealed partial class Gizmos : Node
 		Dynamic? hoveringOn = null;
 		if (intersection.Count > 0)
 		{
-			Node collider = (Node)intersection["collider"];
+			Node collider = (Node)(GodotObject)intersection["collider"];
 			hoveringOn = Dynamic.GetDynFromCreatorBounds(collider);
 			if (hoveringOn == null && collider is CollisionObject3D colObj)
 			{
-				hoveringOn = Physical.GetPhysicalFromBody(colObj);
-				if (hoveringOn == null)
-				{
-					hoveringOn = Physical.GetPhysicalFromCollider(collider);
-				}
+				hoveringOn = Physical.GetPhysicalFromBody(colObj) ?? Physical.GetPhysicalFromCollider(collider);
 			}
+		}
+
+		if (@event is InputEventScreenTouch || @event is InputEventScreenDrag)
+		{
+			_touchPointer = true;
+		}
+		else if (@event is InputEventMouse pointer)
+		{
+			_touchPointer = pointer.Device == InputEvent.DeviceIdEmulation;
 		}
 
 		if (toolMode == ToolModeEnum.Paint)
 		{
-			if (hoveringOn != null && hoveringOn is Part && !hoveringOn.Locked)
+			if (!_touchPointer && hoveringOn != null && hoveringOn is Part && !hoveringOn.Locked)
 			{
 				_paintBox.SelectionColor = CreatorService.Interface.TargetPartColor;
 				_paintBox.Target = hoveringOn;
@@ -480,7 +546,7 @@ public sealed partial class Gizmos : Node
 			selectInstance = Input.IsKeyPressed(Key.Alt) ? hoveringOn : GetModelRoot(hoveringOn) ?? hoveringOn;
 		}
 
-		if (selectInstance is Dynamic sdyn && !sdyn.Locked)
+		if (!_touchPointer && selectInstance is Dynamic sdyn && !sdyn.Locked)
 		{
 			_hoverBox.Target = sdyn;
 		}
@@ -508,13 +574,20 @@ public sealed partial class Gizmos : Node
 		{
 			if (HoveringGizmos || HoveringUIGizmo || PointerOverActiveGizmo()) { return; }
 			if (button.ButtonIndex != MouseButton.Left) { return; }
+			bool isTouch = button.Device == InputEvent.DeviceIdEmulation;
 			if (button.Pressed)
 			{
 				_isMouseDragging = true;
 				_dragStartPos = button.Position;
+				if (isTouch && !IsSelectedTarget(selectInstance))
+				{
+					_tapPending = true;
+					return;
+				}
 			}
 			else
 			{
+				bool dragHappened = _isDraggingDyn;
 				_isMouseDragging = false;
 				_isDragPending = false;
 				if (_isDraggingDyn)
@@ -523,67 +596,35 @@ public sealed partial class Gizmos : Node
 					CommitHistorySelectedTransform();
 				}
 				DragSelected.Clear();
+				_dragTarget = null;
+
+				if (_reselectTarget != null)
+				{
+					if (!dragHappened)
+					{
+						Root.CreatorContext.Selections.SelectOnly(_reselectTarget);
+					}
+					_reselectTarget = null;
+				}
+				if (_tapPending)
+				{
+					_tapPending = false;
+					if (button.Position.DistanceTo(_dragStartPos) < TapSlop)
+					{
+						SelectAtPointer(hoveringOn, selectInstance, toolMode, false);
+					}
+				}
 				return;
 			}
-			bool isMultiSelect = Input.IsActionPressed("gizmo_multi_select");
-
-			if (hoveringOn != null)
-			{
-				// Force select NPC instead of CharacterModel
-				if (selectInstance?.Parent is NPC)
-				{
-					selectInstance = selectInstance.Parent;
-				}
-
-				// Don't select creator freelook/current cam
-				if (selectInstance == Root.Environment.CurrentCamera)
-				{
-					selectInstance = null;
-				}
-
-				if (selectInstance != null && selectInstance is Dynamic targetDyn)
-				{
-					if (targetDyn.Locked && !isMultiSelect)
-					{
-						Root.CreatorContext.Selections.DeselectAll();
-						return;
-					}
-
-					if (isMultiSelect)
-					{
-						if (Root.CreatorContext.Selections.HasSelected(targetDyn))
-						{
-							Root.CreatorContext.Selections.Deselect(targetDyn);
-						}
-						else
-						{
-							ProcessPaint(hoveringOn);
-							Root.CreatorContext.Selections.Select(targetDyn);
-						}
-					}
-					else
-					{
-						ProcessPaint(hoveringOn);
-						Root.CreatorContext.Selections.SelectOnly(targetDyn);
-					}
-
-					if (toolMode == ToolModeEnum.Select)
-					{
-						DragSelected.Add(targetDyn);
-						_isDragPending = true;
-					}
-				}
-			}
-			else
-			{
-				if (!isMultiSelect)
-				{
-					Root.CreatorContext.Selections.DeselectAll();
-				}
-			}
+			SelectAtPointer(hoveringOn, selectInstance, toolMode, true);
 		}
 		else if (@event is InputEventMouseMotion motion)
 		{
+			if (_tapPending && motion.Position.DistanceTo(_dragStartPos) >= TapSlop)
+			{
+				_tapPending = false;
+			}
+
 			if (_isDragPending && !_isDraggingDyn)
 			{
 				float distance = motion.Position.DistanceTo(_dragStartPos);
@@ -592,7 +633,7 @@ public sealed partial class Gizmos : Node
 					_isDraggingDyn = true;
 					_isDragPending = false;
 					Polytoria.Shared.Globals.GizmoDragging = true;
-					_history.NewAction("Select Drag Transform");
+					_history.NewAction("Drag Transform");
 					RecordHistoryUndo();
 				}
 			}
@@ -602,8 +643,92 @@ public sealed partial class Gizmos : Node
 				DragSelectedDynamics();
 			}
 		}
+	}
 
-		_lastHovered = hoveringOn;
+	private void SelectAtPointer(Dynamic? hoveringOn, Instance? selectInstance, ToolModeEnum toolMode, bool startDrag)
+	{
+		bool isMultiSelect = Input.IsActionPressed("gizmo_multi_select");
+
+		if (hoveringOn != null)
+		{
+			// Force select NPC instead of CharacterModel
+			if (selectInstance?.Parent is NPC)
+			{
+				selectInstance = selectInstance.Parent;
+			}
+
+			// Don't select creator freelook/current cam
+			if (selectInstance == Root.Environment.CurrentCamera)
+			{
+				selectInstance = null;
+			}
+
+			if (selectInstance != null && selectInstance is Dynamic targetDyn)
+			{
+				if (targetDyn.Locked)
+				{
+					if (!isMultiSelect) Root.CreatorContext.Selections.DeselectAll();
+					return;
+				}
+
+				if (isMultiSelect)
+				{
+					if (Root.CreatorContext.Selections.HasSelected(targetDyn))
+					{
+						Root.CreatorContext.Selections.Deselect(targetDyn);
+					}
+					else
+					{
+						ProcessPaint(hoveringOn);
+						Root.CreatorContext.Selections.Select(targetDyn);
+					}
+				}
+				else if (Root.CreatorContext.Selections.HasSelected(targetDyn) && Selected.Count > 1)
+				{
+					if (toolMode == ToolModeEnum.Paint || toolMode == ToolModeEnum.Brush)
+					{
+						ProcessPaint(Selected);
+					}
+					else
+					{
+						_reselectTarget = targetDyn;
+					}
+				}
+				else
+				{
+					ProcessPaint(hoveringOn);
+					Root.CreatorContext.Selections.SelectOnly(targetDyn);
+				}
+
+				if (startDrag && (toolMode == ToolModeEnum.Select || toolMode == ToolModeEnum.Move))
+				{
+					if (_reselectTarget != null)
+					{
+						DragSelected.AddRange(Selected);
+					}
+					else
+					{
+						DragSelected.Add(targetDyn);
+					}
+					_dragTarget = targetDyn;
+					_isDragPending = true;
+				}
+			}
+		}
+		else
+		{
+			if (!isMultiSelect)
+			{
+				Root.CreatorContext.Selections.DeselectAll();
+			}
+		}
+	}
+
+	private bool IsSelectedTarget(Instance? selectInstance)
+	{
+		if (selectInstance is not Dynamic dyn) return false;
+		if (dyn.Parent is NPC npc && Root.CreatorContext.Selections.HasSelected(npc)) return true;
+		return Root.CreatorContext.Selections.HasSelected(dyn);
 	}
 
 	private void RotateSelectedAround(float angle)
@@ -622,7 +747,7 @@ public sealed partial class Gizmos : Node
 			item.GDNode3D.Rotation += new Vector3(0, rotateAngle, 0);
 
 			if (_selectionBoxes.TryGetValue(item, out var box)) box.InvalidateBoundCache();
-			item.UpdateCurrentTransformCache();
+			item.QueueTransformUpdate();
 		}
 	}
 
@@ -654,50 +779,65 @@ public sealed partial class Gizmos : Node
 			item.GDNode3D.Rotate(tiltAxis, tiltAngle);
 
 			if (_selectionBoxes.TryGetValue(item, out var box)) box.InvalidateBoundCache();
-			item.UpdateCurrentTransformCache();
+			item.QueueTransformUpdate();
 		}
 	}
 
 	private void ProcessPaint(Dynamic dyn)
 	{
-		if (dyn is Part p)
+		ProcessPaint([dyn]);
+	}
+
+	private void ProcessPaint(IEnumerable<Dynamic> dyns)
+	{
+		List<Part> parts = [];
+		foreach (Dynamic d in dyns)
 		{
-			CreatorHistory history = Root.CreatorContext.History;
-			if (CreatorService.Interface.ToolMode == ToolModeEnum.Paint)
+			if (d is Part p) parts.Add(p);
+		}
+		if (parts.Count == 0) return;
+
+		CreatorHistory history = Root.CreatorContext.History;
+		if (CreatorService.Interface.ToolMode == ToolModeEnum.Paint)
+		{
+			Color newC = CreatorService.Interface.TargetPartColor;
+			Dictionary<Part, Color> oldColors = [];
+			foreach (Part p in parts) oldColors[p] = p.Color;
+
+			history.NewAction("Paint Part");
+			history.AddDoCallback(new((_) =>
 			{
-				Color oldC = p.Color;
-				Color newC = CreatorService.Interface.TargetPartColor;
-				history.NewAction("Paint Part");
-				history.AddDoCallback(new((_) =>
-				{
-					p.Color = newC;
-				}));
-				history.AddUndoCallback(new((_) =>
-				{
-					p.Color = oldC;
-				}));
-				history.CommitAction();
-			}
-			else if (CreatorService.Interface.ToolMode == ToolModeEnum.Brush)
+				foreach (Part p in parts) p.Color = newC;
+			}));
+			history.AddUndoCallback(new((_) =>
 			{
-				Part.PartMaterialEnum oldC = p.Material;
-				Part.PartMaterialEnum newC = CreatorService.Interface.TargetPartMaterial;
-				history.NewAction("Brush Part");
-				history.AddDoCallback(new((_) =>
-				{
-					p.Material = newC;
-				}));
-				history.AddUndoCallback(new((_) =>
-				{
-					p.Material = oldC;
-				}));
-				history.CommitAction();
-			}
+				foreach (Part p in parts) p.Color = oldColors[p];
+			}));
+			history.CommitAction();
+		}
+		else if (CreatorService.Interface.ToolMode == ToolModeEnum.Brush)
+		{
+			Part.PartMaterialEnum newC = CreatorService.Interface.TargetPartMaterial;
+			Dictionary<Part, Part.PartMaterialEnum> oldMaterials = [];
+			foreach (Part p in parts) oldMaterials[p] = p.Material;
+
+			history.NewAction("Brush Part");
+			history.AddDoCallback(new((_) =>
+			{
+				foreach (Part p in parts) p.Material = newC;
+			}));
+			history.AddUndoCallback(new((_) =>
+			{
+				foreach (Part p in parts) p.Material = oldMaterials[p];
+			}));
+			history.CommitAction();
 		}
 	}
 
 	private void DragSelectedDynamics()
 	{
+		if (DragSelected.Count == 0) return;
+
 		Vector2 mousePos = _camera.GetViewport().GetMousePosition();
 		Vector3 rayOrigin = _camera.ProjectRayOrigin(mousePos);
 		Vector3 rayNormal = rayOrigin + _camera.ProjectRayNormal(mousePos) * 1000;
@@ -743,32 +883,37 @@ public sealed partial class Gizmos : Node
 			Vector3 hitNormal = (Vector3)intersection["normal"];
 			float snapAmount = CreatorService.Interface.MoveSnapping;
 
+			Dynamic primary = DragSelected.Contains(_dragTarget!) ? _dragTarget! : DragSelected[0];
+
+			Aabb bounds = primary.CreatorBounds;
+			Vector3 center = bounds.GetCenter();
+
+			Vector3 surfacePoint = center;
+
+			if (Mathf.Abs(hitNormal.X) > 0.5f)
+				surfacePoint.X = hitNormal.X > 0 ? bounds.Position.X : bounds.End.X;
+
+			if (Mathf.Abs(hitNormal.Y) > 0.5f)
+				surfacePoint.Y = hitNormal.Y > 0 ? bounds.Position.Y : bounds.End.Y;
+
+			if (Mathf.Abs(hitNormal.Z) > 0.5f)
+				surfacePoint.Z = hitNormal.Z > 0 ? bounds.Position.Z : bounds.End.Z;
+
+			Vector3 primaryPos = primary.GetGlobalPosition();
+			Vector3 pivotOffset = primaryPos - surfacePoint;
+
+			Vector3 snappedHitPos = new(
+				Mathf.Abs(hitNormal.X) > 0.9f ? pos.X : Mathf.Snapped(pos.X, snapAmount),
+				Mathf.Abs(hitNormal.Y) > 0.9f ? pos.Y : Mathf.Snapped(pos.Y, snapAmount),
+				Mathf.Abs(hitNormal.Z) > 0.9f ? pos.Z : Mathf.Snapped(pos.Z, snapAmount)
+			);
+
+			Vector3 delta = (snappedHitPos + pivotOffset) - primaryPos;
+
 			foreach (Dynamic item in DragSelected)
 			{
-				Aabb bounds = item.CreatorBounds;
-				Vector3 center = bounds.GetCenter();
-
-				Vector3 surfacePoint = center;
-
-				if (Mathf.Abs(hitNormal.X) > 0.5f)
-					surfacePoint.X = hitNormal.X > 0 ? bounds.Position.X : bounds.End.X;
-
-				if (Mathf.Abs(hitNormal.Y) > 0.5f)
-					surfacePoint.Y = hitNormal.Y > 0 ? bounds.Position.Y : bounds.End.Y;
-
-				if (Mathf.Abs(hitNormal.Z) > 0.5f)
-					surfacePoint.Z = hitNormal.Z > 0 ? bounds.Position.Z : bounds.End.Z;
-
-				Vector3 pivotOffset = item.GetGlobalPosition() - surfacePoint;
-
-				Vector3 snappedHitPos = new(
-					Mathf.Abs(hitNormal.X) > 0.9f ? pos.X : Mathf.Snapped(pos.X, snapAmount),
-					Mathf.Abs(hitNormal.Y) > 0.9f ? pos.Y : Mathf.Snapped(pos.Y, snapAmount),
-					Mathf.Abs(hitNormal.Z) > 0.9f ? pos.Z : Mathf.Snapped(pos.Z, snapAmount)
-				);
-
-				item.SetGlobalPosition(snappedHitPos + pivotOffset);
-				item.UpdateCurrentTransformCache();
+				item.SetGlobalPosition(item.GetGlobalPosition() + delta);
+				item.QueueTransformUpdate();
 			}
 		}
 	}

@@ -56,9 +56,13 @@ public partial class MultiSelectionBox : Control
 		}
 		Instance[] allObjects = Overlay.World.Environment.GetDescendants();
 
-		Overlay.World.CreatorContext.Selections.DeselectAll();
-
 		bool altPressed = Input.IsKeyPressed(Key.Alt);
+		bool multiSelect = Input.IsActionPressed("gizmo_multi_select");
+
+		if (!multiSelect)
+		{
+			Overlay.World.CreatorContext.Selections.DeselectAll();
+		}
 
 		foreach (Instance item in allObjects)
 		{
@@ -138,6 +142,17 @@ public partial class MultiSelectionBox : Control
 		_panel.Size = new Vector2(Mathf.Abs(sizeProc.X), Mathf.Abs(sizeProc.Y));
 	}
 
+	public override void _Process(double delta)
+	{
+		if (_dragging && !Overlay.World.Input.IsTouchscreen && !Input.IsMouseButtonPressed(MouseButton.Left))
+		{
+			_dragging = false;
+			_panel.Visible = false;
+			_panel.Size = Vector2.Zero;
+		}
+		base._Process(delta);
+	}
+
 	public override void _UnhandledInput(InputEvent @event)
 	{
 		Gizmos gizmos = Overlay.World.CreatorContext.Gizmos;
@@ -145,6 +160,8 @@ public partial class MultiSelectionBox : Control
 
 		if (Overlay.World.Input.IsTouchscreen)
 		{
+			if (@event is InputEventScreenTouch held && held.Index == Polytoria.Client.UI.Touch.JoystickArea.HeldIndex) return;
+			if (@event is InputEventScreenDrag heldDrag && heldDrag.Index == Polytoria.Client.UI.Touch.JoystickArea.HeldIndex) return;
 			if (@event is InputEventScreenTouch touch)
 			{
 				if (touch.Pressed)

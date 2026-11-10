@@ -14,6 +14,7 @@ public partial class JumpButton : Control
 	private static readonly Color NormalModulate = new(1f, 1f, 1f);
 	private static readonly Color PressedModulate = new(2f, 2f, 2f);
 	private const float TweenDuration = 0.08f;
+	private const float BaseScale = 0.75f;
 
 	private TouchScreenButton _button = null!;
 	private Tween? _tween;
@@ -24,8 +25,9 @@ public partial class JumpButton : Control
 	{
 		Visible = World.Current!.Input.IsTouchscreen && !Polytoria.Shared.XRBootstrap.IsActive;
 		_button = GetNode<TouchScreenButton>("TouchScreenButton");
-		_baseScale = _button.Scale;
-		_basePosition = _button.Position;
+		Vector2 size = _button.TextureNormal?.GetSize() ?? Vector2.Zero;
+		_baseScale = _button.Scale * BaseScale;
+		_basePosition = _button.Position + size * _button.Scale * (1f - BaseScale);
 		_button.Pressed += () => AnimateModulate(PressedModulate);
 		_button.Released += () => AnimateModulate(NormalModulate);
 		ClientSettingsService.Instance.Changed += OnSettingChanged;

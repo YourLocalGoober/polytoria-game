@@ -50,6 +50,8 @@ public partial class CreatorEntry : Node
 			GetTree().Root.ContentScaleFactor = 2.25f;
 			AddChild(new Polytoria.Shared.Misc.TouchLongPressToRightClick { Name = "TouchLongPressToRightClick" });
 			AddChild(new Polytoria.Creator.UI.TouchSplitResize { Name = "TouchSplitResize" });
+			UnbindStickFromUI();
+			InsetTopBar();
 
 			if (Engine.HasSingleton("PolytoriaPermissions"))
 			{
@@ -81,6 +83,29 @@ public partial class CreatorEntry : Node
 		if (launchToken != null)
 		{
 			await PolyCreatorAPI.LoginWithToken(launchToken);
+		}
+	}
+
+	private const float TopBarInset = 24f;
+
+	private void InsetTopBar()
+	{
+		PanelContainer? menu = GetNodeOrNull<PanelContainer>("GUI/Menu");
+		if (menu?.GetThemeStylebox("panel")?.Duplicate() is not StyleBox box) return;
+		box.ContentMarginLeft = Mathf.Max(box.ContentMarginLeft, 0) + TopBarInset;
+		box.ContentMarginRight = Mathf.Max(box.ContentMarginRight, 0) + TopBarInset;
+		menu.AddThemeStyleboxOverride("panel", box);
+	}
+
+	private static void UnbindStickFromUI()
+	{
+		foreach (string action in new[] { "ui_up", "ui_down", "ui_left", "ui_right" })
+		{
+			if (!InputMap.HasAction(action)) continue;
+			foreach (InputEvent e in InputMap.ActionGetEvents(action))
+			{
+				if (e is InputEventJoypadMotion) InputMap.ActionEraseEvent(action, e);
+			}
 		}
 	}
 }

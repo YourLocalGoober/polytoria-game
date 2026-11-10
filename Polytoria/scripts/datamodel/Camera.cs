@@ -28,6 +28,7 @@ public sealed partial class Camera : Dynamic
 	[ScriptProperty] new public Vector3 Forward => -GetGlobalTransform().Basis.Z.Normalized();
 
 	private CameraModeEnum _mode;
+	private PhysicsRayQueryParameters3D? _clipQuery;
 	private float _fov;
 	private bool _clipThroughWalls;
 	private float _minDistance;
@@ -38,13 +39,14 @@ public sealed partial class Camera : Dynamic
 	private float _scrollLerpSpeed;
 	private float _orthographicSize;
 	private Vector3 _positionOffset;
-	private Vector3 _rotationOffset;
+	private Quaternion _rotationOffset = Quaternion.Identity;
 	private bool _isFirstPerson;
 	private float _sensitivityMultipler = 1f;
 	private bool _canLock = true;
 	private float _xSpeed = 120.0f;
 	private float _ySpeed = 120.0f;
 	private bool _followLerp = false;
+	private bool _dragPanning = false;
 	private bool _ctrlLocked = false;
 	private bool _alwaysLocked = false;
 
@@ -53,7 +55,7 @@ public sealed partial class Camera : Dynamic
 
 	private float _moveSpeed = 8f;
 	private readonly float _rotateSpeed = 0.005f;
-	private Dynamic? _target = null!;
+	private Dynamic? _target = null;
 
 	private bool _isMouseCaptured;
 	private Vector2I _lastMousePosition;
@@ -88,6 +90,10 @@ public sealed partial class Camera : Dynamic
 		get => _mode;
 		set
 		{
+			// Matching EnterFirstPerson is ran in CameraProcess
+			if (IsFirstPerson && value != CameraModeEnum.Follow)
+				ExitFirstPerson();
+
 			_mode = value;
 			OnPropertyChanged();
 		}
@@ -236,13 +242,24 @@ public sealed partial class Camera : Dynamic
 		}
 	}
 
-	[Editable, ScriptProperty]
-	public Vector3 RotationOffset
+	[ScriptProperty, CloneIgnore, SaveIgnore]
+	public Quaternion QuaternionOffset
 	{
 		get => _rotationOffset;
 		set
 		{
 			_rotationOffset = value;
+			OnPropertyChanged();
+		}
+	}
+
+	[Editable, ScriptProperty]
+	public Vector3 RotationOffset
+	{
+		get => MathUtils.Vector3RadToDeg(_rotationOffset.GetEuler());
+		set
+		{
+			_rotationOffset = Quaternion.FromEuler(MathUtils.Vector3DegToRad(value));
 			OnPropertyChanged();
 		}
 	}
@@ -314,11 +331,14 @@ public sealed partial class Camera : Dynamic
 			_ctrlLocked = value;
 			if (_ctrlLocked)
 			{
-				StartTurning();
+				if (!_dragPanning)
+				{
+					StartTurning();
+				}
 			}
 			else
 			{
-				if (!AlwaysLocked)
+				if (!AlwaysLocked && !_dragPanning)
 				{
 					StopTurning();
 				}
@@ -349,7 +369,7 @@ public sealed partial class Camera : Dynamic
 		{
 			if (_target != null && _target.IsDeleted)
 			{
-				_target = null!;
+				_target = null;
 			}
 			return _target;
 		}
@@ -484,6 +504,15 @@ public sealed partial class Camera : Dynamic
 		_inputHelper.GodotUnhandledInputEvent -= OnInput;
 		_inputHelper.GodotInputEvent -= OnInputEarly;
 		_inputHelper.QueueFree();
+		if (Root.Input != null)
+		{
+			Root.Input.GameFocused.Disconnect(OnGameFocused);
+			Root.Input.GameUnfocused.Disconnect(OnGameUnfocused);
+		}
+		if (Node.IsInstanceValid(_turnX))
+		{
+			_turnX.QueueFree();
+		}
 		base.PreDelete();
 	}
 
@@ -553,11 +582,11 @@ public sealed partial class Camera : Dynamic
 			{
 				if (Input.IsActionPressed("zoom_in"))
 				{
-					_targetZoom = _distance - (ScrollSensitivity / 5);
+					_targetZoom -= ScrollSensitivity / 0.4f * (float)delta;
 				}
 				if (Input.IsActionPressed("zoom_out"))
 				{
-					_targetZoom = _distance + (ScrollSensitivity / 5);
+					_targetZoom += ScrollSensitivity / 0.4f * (float)delta;
 				}
 
 				// Handle Controller Right stick input
@@ -569,10 +598,10 @@ public sealed partial class Camera : Dynamic
 			}
 
 			Vector3 computedPosition = Target.Position + PositionOffset;
-			Vector3 computedRotation = _targetRotation + RotationOffset;
+			Quaternion computedRotation = QuaternionOffset * Quaternion.FromEuler(MathUtils.Vector3DegToRad(_targetRotation));
 
 			_turnX.GlobalPosition = computedPosition;
-			_turnX.RotationDegrees = computedRotation;
+			_turnX.Quaternion = computedRotation;
 
 			LimitZoomDistance();
 
@@ -608,7 +637,7 @@ public sealed partial class Camera : Dynamic
 				}
 			}
 
-			_currentZoom = (float)Mathf.Lerp(_currentZoom, _targetZoom, MathUtils.ExpDecay((float)delta, ScrollLerpSpeed));
+			_currentZoom = Mathf.Lerp(_currentZoom, _targetZoom, MathUtils.ExpDecay((float)delta, ScrollLerpSpeed));
 			float finalizedZoom = _currentZoom;
 
 			_turnY2.Position = new Vector3(0, 0, _currentZoom);
@@ -619,26 +648,22 @@ public sealed partial class Camera : Dynamic
 				Vector3 origin = computedPosition;
 
 				PhysicsDirectSpaceState3D spaceState = Camera3D.GetWorld3D().DirectSpaceState;
-				PhysicsRayQueryParameters3D query = PhysicsRayQueryParameters3D.Create(origin, desiredCamPos);
-				query.HitFromInside = false;
+				_clipQuery ??= new PhysicsRayQueryParameters3D();
+				_clipQuery.From = origin;
+				_clipQuery.To = desiredCamPos;
+				_clipQuery.HitFromInside = false;
 
 				// Fliter only clipping layers
-				query.CollisionMask = Entity.CameraClipCollisionLayerMask;
+				_clipQuery.CollisionMask = Entity.CameraClipCollisionLayerMask;
 
-				Dictionary? result = spaceState.IntersectRay(query);
+				using Dictionary result = spaceState.IntersectRay(_clipQuery);
 
 				if (result.Count > 0)
 				{
 					Vector3 hitPoint = (Vector3)result["position"];
 
 					float hitDist = origin.DistanceTo(hitPoint) - ClipSafeMargin;
-					finalizedZoom = Mathf.Min(_distance, hitDist);
-
-					// Prevent zooming after zero
-					if (finalizedZoom < 0)
-					{
-						finalizedZoom = 0;
-					}
+					finalizedZoom = Mathf.Max(0, hitDist);
 				}
 			}
 
@@ -728,10 +753,13 @@ public sealed partial class Camera : Dynamic
 	{
 		if (Mode != CameraModeEnum.Follow) return;
 		IsFirstPerson = true;
-		Root.Input.CursorLocked = true;
-		Root.Input.CursorVisible = false;
 		_targetZoom = 0;
-		StartTurning();
+		if (!CtrlLocked && !_dragPanning)
+		{
+			Root.Input.CursorVisible = false;
+			Root.Input.CursorLocked = true;
+			StartTurning();
+		}
 		FirstPersonEntered?.Invoke();
 	}
 
@@ -743,7 +771,7 @@ public sealed partial class Camera : Dynamic
 		{
 			_targetZoom = DefaultZoomDistance;
 		}
-		if (!CtrlLocked)
+		if (!CtrlLocked && !_dragPanning)
 		{
 			Root.Input.CursorVisible = true;
 			Root.Input.CursorLocked = false;
@@ -759,7 +787,7 @@ public sealed partial class Camera : Dynamic
 			CtrlLocked = true;
 		}
 
-		if (IsFirstPerson || AlwaysLocked || CtrlLocked)
+		if (IsFirstPerson || AlwaysLocked || CtrlLocked || _dragPanning)
 		{
 			StartTurning();
 		}
@@ -869,23 +897,35 @@ public sealed partial class Camera : Dynamic
 
 		if (@event is InputEventMouseButton btnEvent)
 		{
-			if (btnEvent.ButtonIndex == MouseButton.Right && !(IsFirstPerson || CtrlLocked))
+			if (btnEvent.ButtonIndex == MouseButton.Right)
 			{
-				if (AlwaysLocked) return;
-				if (btnEvent.Pressed)
+				if (IsFirstPerson || CtrlLocked || AlwaysLocked)
+				{
+					if (!btnEvent.Pressed)
+					{
+						_dragPanning = false;
+					}
+					if (AlwaysLocked) return;
+				}
+				else if (btnEvent.Pressed)
 				{
 					if (!Root.Input.CursorLocked)
 					{
+						_dragPanning = true;
 						StartTurning();
 						Root.Input.CursorLocked = true;
 						Root.Input.CursorVisible = false;
 					}
 				}
-				else if (_turning)
+				else
 				{
-					StopTurning();
-					Root.Input.CursorLocked = false;
-					Root.Input.CursorVisible = true;
+					_dragPanning = false;
+					if (_turning)
+					{
+						StopTurning();
+						Root.Input.CursorLocked = false;
+						Root.Input.CursorVisible = true;
+					}
 				}
 			}
 		}
@@ -923,6 +963,7 @@ public sealed partial class Camera : Dynamic
 	{
 		if (@event is InputEventScreenTouch touch)
 		{
+			if (touch.Pressed && touch.Index == 0) _activeTouches.Clear();
 			if (touch.Pressed) _activeTouches.Add(touch.Index);
 			else _activeTouches.Remove(touch.Index);
 		}
@@ -982,7 +1023,7 @@ public sealed partial class Camera : Dynamic
 		{
 			if (@event is InputEventMouseMotion motion)
 			{
-				_currentRotation = -new Vector2(motion.ScreenRelative.X, motion.ScreenRelative.Y);
+				_currentRotation -= new Vector2(motion.ScreenRelative.X, motion.ScreenRelative.Y);
 			}
 		}
 
@@ -995,9 +1036,9 @@ public sealed partial class Camera : Dynamic
 			SnapBackward();
 		}
 
-		if (@event is InputEventScreenDrag screenDrag && (_isMouseCaptured || _activeTouches.Count < 2))
+		if (@event is InputEventScreenDrag screenDrag && screenDrag.Index != Polytoria.Client.UI.Touch.JoystickArea.HeldIndex && (_isMouseCaptured || _activeTouches.Count < 2))
 		{
-			_currentRotation = -new Vector2(screenDrag.ScreenRelative.X, screenDrag.ScreenRelative.Y);
+			_currentRotation -= screenDrag.ScreenRelative * TouchPixelScale();
 		}
 		else if (@event is InputEventMagnifyGesture magnify)
 		{
@@ -1009,7 +1050,7 @@ public sealed partial class Camera : Dynamic
 			Transform3D t = GetGlobalTransform();
 			Vector3 right = t.Basis.X.Normalized();
 			Vector3 up = t.Basis.Y.Normalized();
-			float panSpeed = _moveSpeed * 0.02f;
+			float panSpeed = _moveSpeed * 0.02f * (Root.Input.IsTouchscreen ? TouchPixelScale() : 1f);
 			Position += right * (-pan.Delta.X * panSpeed) + up * (pan.Delta.Y * panSpeed);
 		}
 
@@ -1019,6 +1060,13 @@ public sealed partial class Camera : Dynamic
 			MoveToSelected();
 		}
 #endif
+	}
+
+	private static float TouchPixelScale()
+	{
+		const float ReferenceDpi = 160f;
+		int dpi = DisplayServer.ScreenGetDpi();
+		return dpi > 0 ? Mathf.Min(1f, ReferenceDpi / dpi) : 1f;
 	}
 
 	private void SnapForward()
@@ -1071,15 +1119,13 @@ public sealed partial class Camera : Dynamic
 
 	private void LimitRotation()
 	{
-		if (_targetRotation.X > 89)
+		if (!_targetRotation.IsFinite())
 		{
-			_targetRotation.X = 89;
+			_targetRotation = new Vector3(0, 180, 0);
 		}
 
-		if (_targetRotation.X < -89)
-		{
-			_targetRotation.X = -89;
-		}
+		_targetRotation.X = Mathf.Clamp(_targetRotation.X, -89, 89);
+		_targetRotation.Y = Mathf.Wrap(_targetRotation.Y, -180, 180);
 	}
 
 	[ScriptMethod]
@@ -1095,7 +1141,7 @@ public sealed partial class Camera : Dynamic
 	}
 
 	[ScriptMethod]
-	public RayResult? ViewportPointToRay(Vector2 pos, Instance[]? ignoreList = null, float maxDistance = 10000f)
+	public RayResult? ViewportPointToRay(Vector2 pos, Instance[]? ignoreList = null, float maxDistance = 10000f, uint passthroughMask = 0)
 	{
 		if (TryGetXRRay(out Vector3 xrOrigin, out Vector3 xrDir))
 		{
@@ -1106,11 +1152,11 @@ public sealed partial class Camera : Dynamic
 		Vector2 screenPos = new(pos.X * size.X, pos.Y * size.Y);
 		Vector3 rayOrigin = Camera3D.ProjectRayOrigin(screenPos);
 		Vector3 rayDir = Camera3D.ProjectRayNormal(screenPos);
-		return Root.Environment.Raycast(rayOrigin, rayDir, maxDistance, ignoreList);
+		return Root.Environment.Raycast(rayOrigin, rayDir, maxDistance, ignoreList, passthroughMask);
 	}
 
 	[ScriptMethod]
-	public RayResult? ScreenPointToRay(Vector2 pos, Instance[]? ignoreList = null, float maxDistance = 10000f)
+	public RayResult? ScreenPointToRay(Vector2 pos, Instance[]? ignoreList = null, float maxDistance = 10000f, uint passthroughMask = 0)
 	{
 		if (TryGetXRRay(out Vector3 xrOrigin, out Vector3 xrDir))
 		{
@@ -1118,7 +1164,7 @@ public sealed partial class Camera : Dynamic
 		}
 		Vector3 rayOrigin = Camera3D.ProjectRayOrigin(pos);
 		Vector3 rayDir = Camera3D.ProjectRayNormal(pos);
-		return Root.Environment.Raycast(rayOrigin, rayDir, maxDistance, ignoreList);
+		return Root.Environment.Raycast(rayOrigin, rayDir, maxDistance, ignoreList, passthroughMask);
 	}
 
 	private bool TryGetXRRay(out Vector3 origin, out Vector3 dir)
@@ -1152,7 +1198,7 @@ public sealed partial class Camera : Dynamic
 		Vector2 screenPos = new(pos.X * size.X, pos.Y * size.Y);
 		Vector3 origin = Camera3D.ProjectRayOrigin(screenPos);
 		Vector3 direction = Camera3D.ProjectRayNormal(screenPos);
-		return (origin + direction * Camera3D.Near);
+		return origin + direction * Camera3D.Near;
 	}
 
 	[ScriptMethod]
@@ -1187,7 +1233,7 @@ public sealed partial class Camera : Dynamic
 	{
 		Vector3 rayOrigin = Camera3D.ProjectRayOrigin(new(pos.X, pos.Y));
 		Vector3 rayDir = Camera3D.ProjectRayNormal(new(pos.X, pos.Y));
-		return (rayOrigin + rayDir * Camera3D.Near);
+		return rayOrigin + rayDir * Camera3D.Near;
 	}
 
 
@@ -1278,7 +1324,7 @@ public sealed partial class Camera : Dynamic
 		// In GoDot the Z axis points to the Camera
 		Vector3 direction = -globalTransform.Basis.Z;
 
-		Datamodel.Environment.RayResult? hit = GetPlacementRay(ignoreList);
+		RayResult? hit = GetPlacementRay(ignoreList);
 
 		if (hit != null)
 		{

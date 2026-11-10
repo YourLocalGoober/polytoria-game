@@ -21,6 +21,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using static Polytoria.Datamodel.Services.NetworkService;
 
 namespace Polytoria.Datamodel;
@@ -34,34 +35,32 @@ public partial class NetworkedObject : IScriptObject
 	private int _sequence = 0;
 	private World _game = null!;
 	private bool _isReplicating = true;
+	internal bool IsApplyingNetProp => !_isReplicating;
 	private bool _isDeleted = false;
+	internal int LuauObjectID;
 
 	private bool _processRegistered = false;
 	private bool _physicsProcessRegistered = false;
 
 	private static readonly ConditionalWeakTable<Type, PropertyInfo[]> _editablePropertiesCache = [];
 	private static readonly ConditionalWeakTable<Type, PropertyInfo[]> _scriptPropertiesCache = [];
-	private static readonly ConditionalWeakTable<Type, PropertyInfo[]> _syncPropertiesCache = [];
 	private static readonly ConcurrentDictionary<NetworkedObject, Node> _netObjToProxy = new();
 	private static readonly ConcurrentDictionary<Node, NetworkedObject> _proxyToNetObj = new();
-	private static readonly ConcurrentDictionary<Type, Dictionary<string, PropertyInfo?>> _syncPropertyByNameCache = new();
 
-	private static readonly Dictionary<Type, Dictionary<string, int>> _typeRpcIdMap = [];
-	private static readonly Dictionary<Type, Dictionary<int, MethodInfo>> _typeRpcMethodMap = [];
-
-	private readonly Dictionary<string, double> _lastUnreliableSyncTime = [];
+	private Dictionary<string, double>? _lastUnreliableSyncTime;
 	private NetworkedObject? _networkParent;
 
 	internal bool InvokedEntry = false;
-	internal HashSet<NetworkedObject> NonInstanceChildren = [];
-	internal readonly Dictionary<string, long> PropertySequence = [];
+	private HashSet<NetworkedObject>? _nonInstanceChildren;
+	private long[]? _propertySequence;
+	private long[] PropertySequence => _propertySequence ??= new long[PropSyncRegistry.GetProps(GetType()).Count];
 
 	public NetworkedObject? NetworkParent
 	{
 		get => _networkParent;
 		set
 		{
-			if (value == _networkParent) return;
+			if (value == _networkParent || value == this) return;
 			if (_networkParent != null)
 			{
 				InvokeExitTree();
@@ -69,13 +68,18 @@ public partial class NetworkedObject : IScriptObject
 			}
 			if (_networkParent != null && this is not Instance)
 			{
-				_networkParent.NonInstanceChildren.Remove(this);
+				_networkParent._nonInstanceChildren?.Remove(this);
 			}
 			if (_networkParent is Instance preI && this is Instance selfpreI)
 			{
 				selfpreI.RemoveNameFromParent();
 				selfpreI.RemoveLegacyNameFromParent();
-				preI.Children.Remove(selfpreI);
+				if (preI.legacyChild.TryGetValue(selfpreI.LegacyName, out Instance? current) && current == selfpreI)
+					preI.legacyChild.Remove(selfpreI.LegacyName);
+				List<Instance> siblings = preI.Children;
+				int childIdx = 0;
+				while (childIdx < siblings.Count && !ReferenceEquals(siblings[childIdx], selfpreI)) childIdx++;
+				if (childIdx < siblings.Count) siblings.RemoveAt(childIdx);
 				preI.ChildRemoved.Invoke(selfpreI);
 			}
 
@@ -85,15 +89,7 @@ public partial class NetworkedObject : IScriptObject
 
 			if (_networkParent != null && this is not Instance)
 			{
-				_networkParent.NonInstanceChildren.Add(this);
-			}
-			if (_networkParent is Instance postI && this is Instance selfpostI)
-			{
-				selfpostI.AddNameToParent();
-				selfpostI.AddLegacyNameToParent();
-				postI.Children.Add(selfpostI);
-				selfpostI.Index = postI.Children.Count - 1;
-				postI.ChildAdded.Invoke(selfpostI);
+				(_networkParent._nonInstanceChildren ??= []).Add(this);
 			}
 
 			if (_networkParent != null)
@@ -117,6 +113,15 @@ public partial class NetworkedObject : IScriptObject
 				}
 
 				TreeEntered.Invoke();
+			}
+
+			if (_networkParent is Instance postI && this is Instance selfpostI)
+			{
+				selfpostI.AddNameToParent();
+				selfpostI.AddLegacyNameToParent();
+				postI.Children.Add(selfpostI);
+				selfpostI.Index = postI.Children.Count - 1;
+				postI.ChildAdded.Invoke(selfpostI);
 			}
 		}
 	}
@@ -165,7 +170,7 @@ public partial class NetworkedObject : IScriptObject
 
 			string setto = value;
 
-			if (GetType().IsDefined(typeof(StaticAttribute), false))
+			if (GetType().IsDefinedCached(typeof(StaticAttribute), false))
 				throw new InvalidOperationException($"Cannot set Name on static type '{GetType().Name}'.");
 			if (string.IsNullOrWhiteSpace(setto))
 				setto = ClassName;
@@ -261,7 +266,7 @@ public partial class NetworkedObject : IScriptObject
 		}
 	}
 
-	private readonly Dictionary<string, object?> _lastSyncedValues = [];
+	private Dictionary<string, object?>? _lastSyncedValues;
 	protected bool isInitialized = false;
 
 	public bool IsDeleted
@@ -299,7 +304,8 @@ public partial class NetworkedObject : IScriptObject
 
 	internal int AppliedSequence = 0;
 
-	internal readonly HashSet<string> PendingProps = [];
+	private HashSet<string>? _pendingProps;
+	internal HashSet<string> PendingProps => _pendingProps ??= [];
 
 	internal bool IsPropReady { get; set; } = false;
 
@@ -336,7 +342,9 @@ public partial class NetworkedObject : IScriptObject
 	internal int NetPropAuthority { get; set; } = 1; // Network authority for changing properties
 
 
-	internal Dictionary<string, NetworkedObject> UniqueNames = [];
+	private Dictionary<string, NetworkedObject>? _uniqueNames;
+	internal Dictionary<string, NetworkedObject> UniqueNames => _uniqueNames ??= [];
+	private Dictionary<string, int>? _nameCounters;
 
 	[ScriptProperty] public PTSignal TreeEntered { get; private set; } = new();
 	[ScriptProperty] public PTSignal TreeExited { get; private set; } = new();
@@ -345,7 +353,7 @@ public partial class NetworkedObject : IScriptObject
 
 	public NetworkedObject()
 	{
-		InitializeRpcMethods();
+		RpcDispatchRegistry.WarmType(GetType());
 
 		// Ignore if use node is false
 		if (!Globals.UseNodes) return;
@@ -363,7 +371,7 @@ public partial class NetworkedObject : IScriptObject
 
 	public bool TrySetName(string value)
 	{
-		if (GetType().IsDefined(typeof(StaticAttribute), false)
+		if (GetType().IsDefinedCached(typeof(StaticAttribute), false)
 			|| string.IsNullOrWhiteSpace(value))
 			return false;
 
@@ -389,13 +397,19 @@ public partial class NetworkedObject : IScriptObject
 		(string baseName, int startNumber) = GetBaseNameAndNumber(original);
 
 		int lowestAvailable = startNumber > 0 ? startNumber + 1 : 2;
-
-		while (uniqueNames.ContainsKey($"{baseName}{lowestAvailable}"))
+		ref int number = ref lowestAvailable;
+		if (startNumber <= 1)
 		{
-			lowestAvailable++;
+			number = ref CollectionsMarshal.GetValueRefOrAddDefault(NetworkParent._nameCounters ??= [], baseName, out bool exists);
+			if (!exists) number = 2;
 		}
 
-		return $"{baseName}{lowestAvailable}";
+		while (uniqueNames.ContainsKey($"{baseName}{number}"))
+		{
+			number++;
+		}
+
+		return $"{baseName}{number}";
 	}
 
 	private static (string baseName, int number) GetBaseNameAndNumber(string name)
@@ -422,41 +436,6 @@ public partial class NetworkedObject : IScriptObject
 		return (baseName, number);
 	}
 
-	protected void InitializeRpcMethods()
-	{
-		Type type = GetType();
-
-		if (_typeRpcIdMap.ContainsKey(type))
-			return;
-
-		Dictionary<string, int> nameToId = [];
-		Dictionary<int, MethodInfo> idToMethod = [];
-		int id = 0;
-
-		Type? currentType = type;
-		while (currentType != null)
-		{
-#pragma warning disable IL2075 // Reflection access is already defined
-			foreach (var method in currentType.GetMethods(
-				BindingFlags.Public | BindingFlags.NonPublic |
-				BindingFlags.Instance | BindingFlags.DeclaredOnly))
-			{
-				if (method.GetCustomAttribute<NetRpcAttribute>() != null &&
-					!nameToId.ContainsKey(method.Name))
-				{
-					nameToId[method.Name] = id;
-					idToMethod[id] = method;
-					id++;
-				}
-			}
-#pragma warning restore IL2075 // 'this' argument does not satisfy 'DynamicallyAccessedMembersAttribute' in call to target method. The return value of the source method does not have matching annotations.
-			currentType = currentType.BaseType;
-		}
-
-		_typeRpcIdMap[type] = nameToId;
-		_typeRpcMethodMap[type] = idToMethod;
-	}
-
 	private void RegisterName()
 	{
 		if (NetworkParent == null || string.IsNullOrEmpty(_name)) return;
@@ -471,6 +450,11 @@ public partial class NetworkedObject : IScriptObject
 			&& ReferenceEquals(currentOwner, this))
 		{
 			NetworkParent.UniqueNames.Remove(_name);
+			if (NetworkParent._nameCounters is { } counters)
+			{
+				(string baseName, int number) = GetBaseNameAndNumber(_name);
+				if (number >= 2 && counters.GetValueOrDefault(baseName) > number) counters[baseName] = number;
+			}
 		}
 	}
 
@@ -553,7 +537,7 @@ public partial class NetworkedObject : IScriptObject
 
 	public NetworkedObject? FindNonInstanceChild(string name)
 	{
-		foreach (NetworkedObject child in NonInstanceChildren)
+		foreach (NetworkedObject child in _nonInstanceChildren ?? [])
 		{
 			if (child.Name == name)
 			{
@@ -620,8 +604,8 @@ public partial class NetworkedObject : IScriptObject
 		SetProcess(false);
 		SetPhysicsProcess(false);
 
-		NonInstanceChildren.Clear();
-		PendingProps.Clear();
+		_nonInstanceChildren?.Clear();
+		_pendingProps?.Clear();
 
 		try
 		{
@@ -750,13 +734,13 @@ public partial class NetworkedObject : IScriptObject
 	{
 		foreach (PropertyInfo propInfo in GetScriptProperties())
 		{
-			if (propInfo.PropertyType == typeof(PTSignal))
+			if (propInfo.PropertyType.IsAssignableTo(typeof(PTSignal)))
 			{
 				// Disconnect all signals
 				object? val = propInfo.GetValue(this);
 				if (val is PTSignal signal)
 				{
-					signal.DisconnectAll();
+					signal.DisconnectAll(propInfo.PropertyType == typeof(PTSignal));
 				}
 			}
 			else if (propInfo.PropertyType.IsAssignableTo(typeof(NetworkedObject)) || propInfo.PropertyType.IsAssignableTo(typeof(RefCounted)))
@@ -782,7 +766,7 @@ public partial class NetworkedObject : IScriptObject
 			}
 		}
 
-		foreach (NetworkedObject item in NonInstanceChildren)
+		foreach (NetworkedObject item in _nonInstanceChildren ?? [])
 		{
 			item.InvokeEnterTree();
 		}
@@ -810,7 +794,7 @@ public partial class NetworkedObject : IScriptObject
 				}
 			}
 
-			foreach (NetworkedObject item in NonInstanceChildren)
+			foreach (NetworkedObject item in _nonInstanceChildren ?? [])
 			{
 				item.InvokeExitTree();
 			}
@@ -1072,7 +1056,8 @@ public partial class NetworkedObject : IScriptObject
 
 	protected void OnPropertyChanged([CallerMemberName] string propertyName = "", bool syncToNet = true)
 	{
-		PropertyChanged.Invoke(propertyName);
+		if (PropertyChanged.HasConnections)
+			PropertyChanged.InvokeOne(propertyName);
 		if (syncToNet)
 			SyncPropToClients(propertyName);
 	}
@@ -1088,109 +1073,85 @@ public partial class NetworkedObject : IScriptObject
 		// If during replication process, return
 		if (!_isReplicating) return;
 
-		PropertyInfo? prop = GetSyncProperty(propertyName);
+		PropSyncProp? entry = PropSyncRegistry.GetProp(GetType(), propertyName);
 
-		if (prop != null)
+		if (entry == null) return;
+
+		object? current = entry.GetValue(this);
+
+		if (!ShouldBroadcastPropChange(propertyName, entry.HasSyncVar, entry.AllowAuthorWrite, entry.ServerOnly, entry.Unreliable, current, out bool broadcastUnreliable))
+			return;
+
+		if (Root.Network.IsServer)
+			Root.Network.PropSync.BroadcastPropUpdate(this, entry, current, broadcastUnreliable);
+		else
+			Root.Network.PropSync.BroadcastPropUpdateToServer(this, entry, current, broadcastUnreliable);
+	}
+
+	private bool ShouldBroadcastPropChange(string propertyName, bool hasSyncVar, bool allowAuthorWrite, bool serverOnly, bool unreliableFlag,
+		object? current, out bool broadcastUnreliable)
+	{
+		bool shouldBroadcast =
+			!hasSyncVar
+			|| (!allowAuthorWrite && !serverOnly)
+			|| (allowAuthorWrite && NetworkAuthority == Root.Network.LocalPeerID)
+			|| (serverOnly && Root.Network.IsServer)
+			|| Root.Network.IsServer;
+
+		broadcastUnreliable = unreliableFlag && !Root.Network.IsServer;
+
+		if (!broadcastUnreliable && _lastSyncedValues?.TryGetValue(propertyName, out object? lastValue) == true)
 		{
-			SyncVarAttribute? syncvar = prop.GetCustomAttribute<SyncVarAttribute>();
-
-			bool shouldBroadcast =
-				// If no SyncVar at all -> always broadcast
-				syncvar == null
-				// If SyncVar exists without extra rules -> broadcast
-				|| (!syncvar.AllowAuthorWrite && !syncvar.ServerOnly)
-				// AllowAuthorWrite rule
-				|| (syncvar.AllowAuthorWrite && NetworkAuthority == Root.Network.LocalPeerID)
-				// ServerOnly rule
-				|| (syncvar.ServerOnly && Root.Network.IsServer)
-				// Server rule, server has authority over everything
-				|| Root.Network.IsServer;
-
-			bool broadcastUnreliable = false;
-
-			if (syncvar != null)
-			{
-				// Ignore unreliable rule when syncing from server
-				if (syncvar.Unreliable && !Root.Network.IsServer)
-				{
-					broadcastUnreliable = true;
-				}
-			}
-
-			object? current = prop.GetValue(this);
-
-			// Check if last sync value is the same, or else skip if unreliable is on
-			if (!broadcastUnreliable && _lastSyncedValues.TryGetValue(propertyName, out object? lastValue))
-			{
-				// Check if last value is null, or is the same as one before
-				if ((lastValue == null && current == null) || (lastValue != null && lastValue.Equals(current))) { return; }
-			}
-
-			// Update cache
-			_lastSyncedValues[propertyName] = current;
-
-			if (shouldBroadcast)
-			{
-				// Throttle unreliable syncs
-				if (broadcastUnreliable && !Root.Network.IsServer)
-				{
-					double currentTime = Time.GetTicksMsec() / 1000.0;
-
-					if (_lastUnreliableSyncTime.TryGetValue(propertyName, out double lastSyncTime))
-					{
-						double elapsed = currentTime - lastSyncTime;
-
-						if (elapsed < DefaultUnreliableSyncInterval)
-						{
-							// Drop the message if throttled
-							return;
-						}
-					}
-
-					_lastUnreliableSyncTime[propertyName] = currentTime;
-				}
-
-				if (Root.Network.IsServer)
-				{
-					// Broadcast to all on server
-					BroadcastPropUpdate(prop.Name, current, broadcastUnreliable);
-				}
-				else
-				{
-					// Broadcast to server if client
-					BroadcastPropUpdateToServer(prop.Name, current, broadcastUnreliable);
-				}
-			}
+			if ((lastValue == null && current == null) || (lastValue != null && lastValue.Equals(current))) { return false; }
 		}
+
+		(_lastSyncedValues ??= [])[propertyName] = current;
+
+		if (!shouldBroadcast) return false;
+
+		if (broadcastUnreliable && !Root.Network.IsServer)
+		{
+			double currentTime = Time.GetTicksMsec() / 1000.0;
+
+			if (_lastUnreliableSyncTime?.TryGetValue(propertyName, out double lastSyncTime) == true)
+			{
+				double elapsed = currentTime - lastSyncTime;
+
+				if (elapsed < DefaultUnreliableSyncInterval)
+				{
+					return false;
+				}
+			}
+
+			(_lastUnreliableSyncTime ??= [])[propertyName] = currentTime;
+		}
+
+		return true;
 	}
 
 	/// <summary>
 	/// Get sequence of property name
 	/// </summary>
-	/// <param name="propertyName"></param>
+	/// <param name="prop"></param>
 	/// <returns></returns>
-	internal long GetSequenceForProp(string propertyName)
+	internal long GetSequenceForProp(PropSyncProp prop)
 	{
-		PropertySequence.TryGetValue(propertyName, out long val);
-		val += 1;
-		PropertySequence[propertyName] = val;
-
-		return val;
+		return ++PropertySequence[prop.Index];
 	}
 
 	/// <summary>
 	/// Compare sequence with the property
 	/// </summary>
-	/// <param name="propertyName"></param>
+	/// <param name="prop"></param>
 	/// <param name="sequence"></param>
 	/// <returns></returns>
-	internal bool CompareSequenceForProp(string propertyName, long sequence)
+	internal bool CompareSequenceForProp(PropSyncProp prop, long sequence)
 	{
-		PropertySequence.TryGetValue(propertyName, out long val);
+		long[] sequences = PropertySequence;
 
-		if (sequence > val)
+		if (sequence > sequences[prop.Index])
 		{
-			PropertySequence[propertyName] = sequence;
+			sequences[prop.Index] = sequence;
 			return true;
 		}
 
@@ -1222,7 +1183,6 @@ public partial class NetworkedObject : IScriptObject
 			ClassName = ClassName,
 			Authority = NetworkAuthority,
 			Props = GetNetPropReplicateData(),
-			NodePath = NetworkPath,
 			ParentNodePath = NetworkParent?.NetworkPath ?? "",
 			ParentNodeID = NetworkParent?.NetworkedObjectID ?? "",
 			NetworkID = NetworkedObjectID,
@@ -1237,10 +1197,8 @@ public partial class NetworkedObject : IScriptObject
 		string className = data.ClassName;
 		int authority = data.Authority;
 		NetPropReplicateData[] props = data.Props;
-		//PT.Print(Root.Network.LocalPeerID, " ", data.nodePath, " on the way");
 
-		NetworkedObject? existingObj = null;
-
+		NetworkedObject? existingObj;
 
 		if (this is Instance i3)
 		{
@@ -1250,7 +1208,6 @@ public partial class NetworkedObject : IScriptObject
 		{
 			existingObj = FindNonInstanceChild(objName);
 		}
-
 
 		if (existingObj != null)
 		{
@@ -1314,7 +1271,7 @@ public partial class NetworkedObject : IScriptObject
 	{
 		List<NetworkedObject> instances = [];
 
-		instances.AddRange(NonInstanceChildren);
+		if (_nonInstanceChildren != null) instances.AddRange(_nonInstanceChildren);
 
 		if (this is Instance i)
 		{
@@ -1335,7 +1292,7 @@ public partial class NetworkedObject : IScriptObject
 
 		if (!ShouldReplicateChild) return [];
 
-		instances.AddRange(NonInstanceChildren);
+		if (_nonInstanceChildren != null) instances.AddRange(_nonInstanceChildren);
 
 		if (this is Instance i)
 		{
@@ -1358,19 +1315,9 @@ public partial class NetworkedObject : IScriptObject
 		{
 			instances.AddRange(i.Children);
 		}
-		instances.AddRange(NonInstanceChildren);
+		if (_nonInstanceChildren != null) instances.AddRange(_nonInstanceChildren);
 
 		return [.. instances];
-	}
-
-	private void BroadcastPropUpdate(string propName, object? propValue, bool unreliable)
-	{
-		Root.Network.PropSync.BroadcastPropUpdate(this, propName, propValue, unreliable);
-	}
-
-	private void BroadcastPropUpdateToServer(string propName, object? propValue, bool unreliable)
-	{
-		Root.Network.PropSync.BroadcastPropUpdateToServer(this, propName, propValue, unreliable);
 	}
 
 	public void NetSendAllPropUpdate(int toPeerId)
@@ -1385,11 +1332,13 @@ public partial class NetworkedObject : IScriptObject
 	/// <param name="isSyncOnce"></param>
 	public void ApplyNetProps(NetPropReplicateData[] props, bool isSyncOnce)
 	{
+		(_lastSyncedValues ??= []).EnsureCapacity(props.Length);
+
 		foreach (NetPropReplicateData prop in props)
 		{
 			try
 			{
-				RecvPropUpdate(prop.Name, prop.ValueRaw, prop.Sequence);
+				RecvPropUpdate(prop.Index, prop.ValueRaw, prop.Sequence);
 			}
 			catch (Exception ex)
 			{
@@ -1404,17 +1353,18 @@ public partial class NetworkedObject : IScriptObject
 
 	public NetPropReplicateData[] GetNetPropReplicateData()
 	{
-		IEnumerable<PropertyInfo> props = GetSyncProperties();
+		Dictionary<string, PropSyncProp> entries = PropSyncRegistry.GetProps(GetType());
 
-		List<NetPropReplicateData> propData = [];
+		List<NetPropReplicateData> replicateData = new(entries.Count);
 
-		foreach (PropertyInfo prop in props)
+		foreach (PropSyncProp entry in entries.Values)
 		{
-			object? value = prop.GetValue(this);
+			object? value = entry.GetValue(this);
 
 			if (value is NetworkedObject nobj)
 			{
 				value = nobj.GetObjectRef();
+
 				if (value == null)
 				{
 					continue;
@@ -1423,16 +1373,16 @@ public partial class NetworkedObject : IScriptObject
 
 			if (value != null)
 			{
-				propData.Add(new NetPropReplicateData
+				replicateData.Add(new NetPropReplicateData
 				{
-					Name = prop.Name,
-					ValueRaw = NetworkPropSync.SerializePropValue(value),
-					Sequence = GetSequenceForProp(prop.Name)
+					Index = (ushort)entry.Index,
+					ValueRaw = entry.Serialize(value),
+					Sequence = GetSequenceForProp(entry)
 				});
 			}
 		}
 
-		return [.. propData];
+		return [.. replicateData];
 	}
 
 	public NetPropNetworkedObjectRef? GetObjectRef()
@@ -1441,83 +1391,80 @@ public partial class NetworkedObject : IScriptObject
 		{ NetID = NetworkedObjectID };
 	}
 
-	internal PropertyInfo? GetSyncProperty(string propName)
+	internal void RecvPropUpdate(int propIndex, byte[] propValueRaw, long sequence)
 	{
-		// Get sync property from cache
-		Dictionary<string, PropertyInfo?> nameCache = _syncPropertyByNameCache
-			.GetOrAdd(GetType(), type =>
-				GetSyncProperties().ToDictionary(p => p.Name, p => (PropertyInfo?)p));
+		PropSyncProp? entry = PropSyncRegistry.GetProp(GetType(), propIndex);
 
-		nameCache.TryGetValue(propName, out PropertyInfo? result);
-		return result;
-	}
-
-	internal void RecvPropUpdate(string propName, byte[] propValueRaw, long sequence)
-	{
-		PropertyInfo? prop = GetSyncProperty(propName);
-
-		if (prop == null) return;
+		if (entry == null) return;
 
 		// Check sequence
-		if (sequence != -1)
+		if (sequence != -1 && !CompareSequenceForProp(entry, sequence))
 		{
-			if (!CompareSequenceForProp(prop.Name, sequence))
-			{
-				return;
-			}
+			return;
 		}
 
-		Type targetType = prop.PropertyType;
+		object? deserialized;
+		try
+		{
+			deserialized = entry.Deserialize(propValueRaw);
+		}
+		catch (Exception ex)
+		{
+			PT.PrintErr("Failed to deserialize prop ", entry.Name, " on ", GetType().Name, ": ", ex);
+			return;
+		}
 
-		object? value = NetworkPropSync.DeserializePropValue(propValueRaw, targetType);
-
-		// Handle NetworkedObject references
-		if (targetType.IsAssignableTo(typeof(NetworkedObject)))
+		if (entry.IsObjectRef)
 		{
 			if (propValueRaw.Length == 0)
 			{
-				SetPropNoReplicate(prop, null);
+				SetPropNoReplicate(entry, null);
 				return;
 			}
 
-			if (value is NetPropNetworkedObjectRef nref && nref.NetID != null)
+			if (deserialized is NetPropNetworkedObjectRef nref && nref.NetID != null)
 			{
 				NetworkedObject? refObj = Root.GetNetObjectFromID(nref.NetID);
 				if (refObj == null)
 				{
-					PendingProps.Add(propName);
+					PendingProps.Add(entry.Name);
 					NetPropNetworkedObjectRef newRef = nref;
-					newRef.TargetProp = prop;
-					Root.Network.PropSync.PendingRefs[newRef] = this;
+					newRef.TargetProp = entry;
+					if (!Root.Network.PropSync.PendingRefs.TryGetValue(nref.NetID, out var refs))
+					{
+						refs = [];
+						Root.Network.PropSync.PendingRefs[nref.NetID] = refs;
+					}
+					refs.Add((newRef, this));
 				}
 				else
 				{
-					SetPropNoReplicate(prop, refObj);
+					SetPropNoReplicate(entry, refObj);
 				}
 			}
 			return;
 		}
 
-		SetPropNoReplicate(prop, value);
+		SetPropNoReplicate(entry, deserialized);
 	}
 
-	private void SetPropNoReplicate(PropertyInfo prop, object? value)
+	private void SetPropNoReplicate(PropSyncProp prop, object? value)
 	{
 		_isReplicating = false;
 		try
 		{
-			_lastSyncedValues[prop.Name] = value;
+			if (Root.Network.IsServer || NetworkPropSync.CheckPropHasAuthority(prop, this, Root.Network.LocalPeerID))
+				(_lastSyncedValues ??= [])[prop.Name] = value;
+			else
+				_lastSyncedValues?.Remove(prop.Name);
 			prop.SetValue(this, value);
 		}
-		catch (TargetInvocationException ex) when (ex.InnerException is InvalidOperationException)
-		{
-			// This value cannot be set, ignore (eg. static class names)
-		}
+		catch (InvalidOperationException) { }
 		catch (Exception ex)
 		{
-			GD.PushError(ex);
+			PT.PrintErr(ex);
 		}
-		PendingProps.Remove(prop.Name);
+		_pendingProps?.Remove(prop.Name);
 		_isReplicating = true;
 	}
 
@@ -1536,7 +1483,7 @@ public partial class NetworkedObject : IScriptObject
 	{
 		NetworkedObject netObj = Globals.LoadNetworkedObject(className) ?? throw new Exception(className + " doesn't exist");
 
-		if (!netObj.GetType().IsDefined(typeof(InstantiableAttribute), false))
+		if (!netObj.GetType().IsDefinedCached(typeof(InstantiableAttribute), false))
 		{
 			netObj.Delete();
 			throw new Exception(className + " is not Instantiable");
@@ -1627,87 +1574,65 @@ public partial class NetworkedObject : IScriptObject
 	public static void CopyProperties(NetworkedObject from, NetworkedObject to)
 	{
 		to.Root = from.Root;
-		Type thisClass = from.GetType();
-		Type cloneType = to.GetType();
 
-		IEnumerable<PropertyInfo> creatorProperties = from.GetEditableProperties();
+		Dictionary<string, DatamodelMetaProp> cloneProps = DatamodelMetaRegistry.GetProps(from.GetType());
 
-		IEnumerable<PropertyInfo> cloneIncludes = from.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
-			.Where(p => p.GetCustomAttribute<CloneIncludeAttribute>() != null);
-
-		creatorProperties = creatorProperties.Concat(cloneIncludes);
-
-		foreach (PropertyInfo prop in creatorProperties)
+		foreach (DatamodelMetaProp prop in cloneProps.Values)
 		{
-			if (prop != null && prop.CanWrite && !prop.IsDefined(typeof(CloneIgnoreAttribute)))
-			{
-				try
-				{
-					object? val = prop.GetValue(from);
+			if (!(prop.IsEditable || prop.HasCloneInclude)) continue;
+			if (prop.HasCloneIgnore) continue;
+			if (!prop.Property.CanWrite) continue;
 
-					// Handle assets (ignore filelinks)
-					if (val is BaseAsset baseAsset && val is not FileLinkAsset)
-					{
-						NetworkedObject cloned = baseAsset.Clone();
-						prop.SetValue(to, cloned);
-					}
-					// Handle referenced child
-					else if (val is Instance i && from is Instance fi && i.IsDescendantOf(fi))
-					{
-						string origin = from.GetPathTo(i);
-						NetworkedObject? newObj = to.GetNetObj(origin);
-						prop.SetValue(to, newObj);
-					}
-					// Handle IData copy
-					else if (val is IData d)
-					{
-						prop.SetValue(to, d.Clone());
-					}
-					else
-					{
-						prop.SetValue(to, val);
-					}
-				}
-				catch (Exception ex)
+			try
+			{
+				object? val = prop.Get(from);
+
+				// Handle assets (ignore filelinks)
+				if (val is BaseAsset baseAsset && val is not FileLinkAsset)
 				{
-					GD.PushError(ex);
+					NetworkedObject cloned = baseAsset.Clone();
+					prop.Set(to, cloned);
 				}
+				// Handle referenced child
+				else if (val is Instance i && from is Instance fi && i.IsDescendantOf(fi))
+				{
+					string origin = from.GetPathTo(i);
+					NetworkedObject? newObj = to.GetNetObj(origin);
+					prop.Set(to, newObj);
+				}
+				// Handle IData copy
+				else if (val is IData d)
+				{
+					prop.Set(to, d.Clone());
+				}
+				else
+				{
+					prop.Set(to, val);
+				}
+			}
+			catch (Exception ex)
+			{
+				GD.PushError(ex);
 			}
 		}
 	}
 
 	public void Rpc(string methodName, params object?[]? args)
 	{
-		InternalNetMsg netmsg = new()
-		{
-			BroadcastAll = true,
-			Target = ProcessRpcTarget(),
-			TargetMethod = GetRpcMethodId(methodName)
-		};
-
-		if (args != null)
-		{
-			foreach (object? arg in args)
-			{
-				netmsg.AddValue(arg);
-			}
-		}
-
-		MethodInfo? md = GetRpcMethod(methodName);
-		NetRpcAttribute? rpcA = md.GetCustomAttribute<NetRpcAttribute>() ?? throw new NetworkException($"Tried to call Rpc function which is not marked as Rpc ({md.Name})");
+		RpcDispatchEntry entry = RpcDispatchRegistry.GetEntry(GetType(), methodName, out int methodId);
 
 		if (Root == null || Root.Network == null || Root.Network.NetInstance == null)
 		{
-			md.Invoke(this, args);
+			entry.InvokeLocal(this, args);
 			return;
 		}
 
-		if (rpcA.CallLocal)
+		if (entry.CallLocal)
 		{
-			md.Invoke(this, args);
+			entry.InvokeLocal(this, args);
 		}
 
-		byte[] msg = netmsg.Serialize();
+		byte[] msg = BuildRpcPacket(methodId, true, args);
 
 		if (Globals.UseLogRPC)
 		{
@@ -1716,107 +1641,59 @@ public partial class NetworkedObject : IScriptObject
 
 		if (Root.Network.IsServer)
 		{
-			Root.Network.NetInstance.BroadcastMessage(msg, rpcA.TransferMode, rpcA.TransferChannel);
+			Root.Network.NetInstance.BroadcastMessage(msg, entry.TransferMode, entry.TransferChannel);
 		}
 		else
 		{
-			Root.Network.NetInstance.SendMessage(1, msg, rpcA.TransferMode, rpcA.TransferChannel);
+			Root.Network.NetInstance.SendMessage(1, msg, entry.TransferMode, entry.TransferChannel);
 		}
 	}
 
 	private string ProcessRpcTarget()
 	{
 		// If this is marked as no sync, use network path instead. as ID will not be available
-		if (GetType().IsDefined(typeof(NoSyncAttribute))) return NetworkPath;
+		if (GetType().IsDefinedCached(typeof(NoSyncAttribute), true)) return NetworkPath;
 		return string.IsNullOrEmpty(NetworkedObjectID) ? NetworkPath : "i:" + NetworkedObjectID;
 	}
 
 	public void RpcId(int id, string methodName, params object?[]? args)
 	{
-		InternalNetMsg netmsg = new()
-		{
-			BroadcastAll = false,
-			Target = ProcessRpcTarget(),
-			TargetMethod = GetRpcMethodId(methodName)
-		};
-		if (args != null)
-		{
-			foreach (object? arg in args)
-			{
-				netmsg.AddValue(arg);
-			}
-		}
-
-		MethodInfo? md = GetRpcMethod(methodName);
-		NetRpcAttribute? rpcA = md.GetCustomAttribute<NetRpcAttribute>() ?? throw new NetworkException($"Tried to call Rpc function which is not marked as Rpc ({md.Name})");
+		RpcDispatchEntry entry = RpcDispatchRegistry.GetEntry(GetType(), methodName, out int methodId);
 
 		if (Root == null || Root.Network == null || Root.Network.NetInstance == null)
 		{
-			md.Invoke(this, args);
+			entry.InvokeLocal(this, args);
 			return;
 		}
 
-		if (rpcA.CallLocal && id == Root.Network.LocalPeerID)
+		if (entry.CallLocal && id == Root.Network.LocalPeerID)
 		{
-			md.Invoke(this, args);
+			entry.InvokeLocal(this, args);
+		}
+		else if (id == Root.Network.LocalPeerID && Root.Network.IsServer && Globals.IsMobileBuild && Root.Entry != null && Root.Entry.IsSoloTest)
+		{
+			int previousSender = RemoteSenderId;
+			RemoteSenderId = id;
+			try
+			{
+				entry.InvokeLocal(this, args);
+			}
+			finally
+			{
+				RemoteSenderId = previousSender;
+			}
 		}
 
 		if (id == 1 && Root.Network.IsServer) return;
 
-		byte[] msg = netmsg.Serialize();
+		byte[] msg = BuildRpcPacket(methodId, false, args);
 
 		if (Globals.UseLogRPC)
 		{
 			PT.Print($"RPCID {id} {methodName} ({msg.Length.Bytes().Kilobytes}kb) ({args?.Length ?? 0} args)");
 		}
-		Root.Network.NetInstance.SendMessage(id, msg, rpcA.TransferMode, rpcA.TransferChannel);
+		Root.Network.NetInstance.SendMessage(id, msg, entry.TransferMode, entry.TransferChannel);
 	}
-
-	internal MethodInfo GetRpcMethod(string methodName)
-	{
-		MethodInfo? md = null;
-		Type? currentType = GetType();
-
-		// Search up the inheritance hierarchy
-		while (currentType != null && md == null)
-		{
-#pragma warning disable IL2075 // Method reflection access is already defined
-			md = currentType.GetMethod(methodName,
-				BindingFlags.Public | BindingFlags.NonPublic |
-				BindingFlags.Instance | BindingFlags.DeclaredOnly);
-#pragma warning restore IL2075
-
-			currentType = currentType.BaseType;
-		}
-
-		if (md == null)
-			throw new NetworkException($"Target Rpc function doesn't exist ({methodName})");
-
-		return md;
-	}
-
-	internal MethodInfo GetRpcMethod(int methodId)
-	{
-		if (!_typeRpcMethodMap.TryGetValue(GetType(), out var idToMethod))
-			throw new Exception($"RPC methods not initialized for type {GetType().Name}");
-
-		if (!idToMethod.TryGetValue(methodId, out var method))
-			throw new Exception($"No RPC method found with id '{methodId}'");
-
-		return method;
-	}
-
-	internal int GetRpcMethodId(string methodName)
-	{
-		if (!_typeRpcIdMap.TryGetValue(GetType(), out var nameToId))
-			throw new Exception($"RPC methods not initialized for type {GetType().Name}");
-
-		if (!nameToId.TryGetValue(methodName, out int id))
-			throw new Exception($"No RPC method found with name '{methodName}'");
-
-		return id;
-	}
-
 
 	[ScriptMethod]
 	public async void Destroy(float time = 0f)
@@ -1841,8 +1718,8 @@ public partial class NetworkedObject : IScriptObject
 
 	internal void InternalDestroy(bool forceDestroy)
 	{
-		if (GetType().IsDefined(typeof(StaticAttribute), false) && !forceDestroy) throw new InvalidOperationException("Cannot destroy a static class");
-		if (GetType().IsDefined(typeof(InternalAttribute), false) && !forceDestroy) throw new InvalidOperationException("Cannot destroy an internal class");
+		if (GetType().IsDefinedCached(typeof(StaticAttribute), false) && !forceDestroy) throw new InvalidOperationException("Cannot destroy a static class");
+		if (GetType().IsDefinedCached(typeof(InternalAttribute), false) && !forceDestroy) throw new InvalidOperationException("Cannot destroy an internal class");
 		if (this is Player && !forceDestroy) throw new InvalidOperationException("Cannot destroy a player, use Kick instead.");
 		if (IsDeleted) return;
 
@@ -1915,6 +1792,16 @@ public partial class NetworkedObject : IScriptObject
 		InitGDNode();
 	}
 
+	private void RunProcess(double delta)
+	{
+		if (!IsDeleted) Process(delta);
+	}
+
+	private void RunPhysicsProcess(double delta)
+	{
+		if (!IsDeleted) PhysicsProcess(delta);
+	}
+
 	public void SetProcess(bool enabled)
 	{
 		if (IsDeleted) return;
@@ -1922,13 +1809,13 @@ public partial class NetworkedObject : IScriptObject
 		if (enabled)
 		{
 			if (_processRegistered) return;
-			Globals.GodotProcess += Process;
+			Globals.GodotProcess += RunProcess;
 			_processRegistered = true;
 		}
 		else
 		{
 			if (!_processRegistered) return;
-			Globals.GodotProcess -= Process;
+			Globals.GodotProcess -= RunProcess;
 			_processRegistered = false;
 		}
 	}
@@ -1940,31 +1827,36 @@ public partial class NetworkedObject : IScriptObject
 		if (enabled)
 		{
 			if (_physicsProcessRegistered) return;
-			Globals.GodotPhysicsProcess += PhysicsProcess;
+			Globals.GodotPhysicsProcess += RunPhysicsProcess;
 			_physicsProcessRegistered = true;
 		}
 		else
 		{
 			if (!_physicsProcessRegistered) return;
-			Globals.GodotPhysicsProcess -= PhysicsProcess;
+			Globals.GodotPhysicsProcess -= RunPhysicsProcess;
 			_physicsProcessRegistered = false;
 		}
 	}
 
 	protected byte[] BuildRpcPacket(string methodName, params object?[] args)
 	{
-		byte[][] msg = new byte[args.Length][];
+		return BuildRpcPacket(RpcDispatchRegistry.GetMethodId(GetType(), methodName), false, args);
+	}
 
-		for (int i = 0; i < args.Length; i++)
+	private byte[] BuildRpcPacket(int methodId, bool broadcastAll, object?[]? args)
+	{
+		byte[][] msg = args == null ? [] : new byte[args.Length][];
+
+		for (int i = 0; i < msg.Length; i++)
 		{
-			msg[i] = NetworkPropSync.SerializePropValue(args[i]);
+			msg[i] = NetworkPropSync.SerializePropValue(args![i]);
 		}
 
 		InternalNetMsg.InternalNetMsgPayload payload = new()
 		{
-			BroadcastAll = false,
+			BroadcastAll = broadcastAll,
 			Target = ProcessRpcTarget(),
-			TargetMethod = GetRpcMethodId(methodName),
+			TargetMethod = methodId,
 			ByteArrays = msg,
 			OriginSender = 0,
 		};
@@ -2007,21 +1899,6 @@ public partial class NetworkedObject : IScriptObject
 #pragma warning disable IL2070 // Reflection access is already defined
 		return _scriptPropertiesCache.GetOrAdd(GetType(), static type =>
 		[.. type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy).Where(p => p.IsDefined(typeof(ScriptPropertyAttribute)) || p.IsDefined(typeof(ScriptLegacyPropertyAttribute)))]
-		);
-#pragma warning restore IL2070 // 'this' argument does not satisfy 'DynamicallyAccessedMembersAttribute' in call to target method. The parameter of method does not have matching annotations.
-	}
-
-	internal IEnumerable<PropertyInfo> GetSyncProperties()
-	{
-#pragma warning disable IL2070 // Reflection access is already defined
-		return _syncPropertiesCache.GetOrAdd(GetType(), static type =>
-		[.. type.GetProperties(BindingFlags.Public | BindingFlags.Instance| BindingFlags.FlattenHierarchy)
-			.Where(p =>
-				// Editable or SyncVar, but not NoSync
-				(p.IsDefined(typeof(EditableAttribute)) ||
-				 p.IsDefined(typeof(SyncVarAttribute))) &&
-				!p.IsDefined(typeof(NoSyncAttribute))
-			)]
 		);
 #pragma warning restore IL2070 // 'this' argument does not satisfy 'DynamicallyAccessedMembersAttribute' in call to target method. The parameter of method does not have matching annotations.
 	}

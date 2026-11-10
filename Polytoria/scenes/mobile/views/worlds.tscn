@@ -3,24 +3,9 @@
 [ext_resource type="Theme" uid="uid://dofh67vfwf6qe" path="res://resources/themes/mobile.tres" id="1_f8xao"]
 [ext_resource type="Script" uid="uid://dkr1tqsj6xwjt" path="res://scripts/mobile/ui/views/MobileViewBase.cs" id="2_jqfof"]
 [ext_resource type="Script" uid="uid://ubmohvfs7uwn" path="res://scripts/mobile/ui/components/worlds/WorldsGrid.cs" id="5_jqfof"]
-[ext_resource type="Script" uid="uid://d4hbhxh54weow" path="res://scripts/mobile/ui/components/worlds/UsernameField.cs" id="6_uname"]
+[ext_resource type="PackedScene" uid="uid://gqgue5w8rr7v" path="res://scenes/mobile/components/worlds/world_of_the_week.tscn" id="6_wotwb"]
 
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_header"]
-content_margin_left = 20.0
-content_margin_top = 22.0
-content_margin_right = 20.0
-content_margin_bottom = 18.0
-bg_color = Color(0.0235, 0.0392, 0.0706, 1)
-border_width_bottom = 1
-border_color = Color(0.118, 0.157, 0.224, 1)
-
-[sub_resource type="StyleBoxEmpty" id="StyleBoxEmpty_body"]
-content_margin_left = 16.0
-content_margin_top = 16.0
-content_margin_right = 16.0
-content_margin_bottom = 24.0
-
-[node name="Control" type="Control" unique_id=612193340]
+[node name="Worlds" type="Control" unique_id=612193340]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -30,67 +15,33 @@ grow_vertical = 2
 theme = ExtResource("1_f8xao")
 script = ExtResource("2_jqfof")
 
-[node name="ScrollContainer" type="ScrollContainer" parent="." unique_id=1721440707]
+[node name="Scroll" type="ScrollContainer" parent="." unique_id=1114247392]
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
+horizontal_scroll_mode = 0
 
-[node name="VBoxContainer" type="VBoxContainer" parent="ScrollContainer" unique_id=554165703]
+[node name="Content" type="VBoxContainer" parent="Scroll" unique_id=1474245213]
 layout_mode = 2
 size_flags_horizontal = 3
-size_flags_vertical = 3
+theme_override_constants/separation = 0
 
-[node name="Header" type="PanelContainer" parent="ScrollContainer/VBoxContainer" unique_id=2001928470]
-layout_mode = 2
-theme_override_styles/panel = SubResource("StyleBoxFlat_header")
-
-[node name="HeaderLayout" type="VBoxContainer" parent="ScrollContainer/VBoxContainer/Header" unique_id=1140332884]
-layout_mode = 2
-theme_override_constants/separation = 4
-
-[node name="Title" type="Label" parent="ScrollContainer/VBoxContainer/Header/HeaderLayout" unique_id=1899649866]
-layout_mode = 2
-theme_override_colors/font_color = Color(0.984, 0.988, 1, 1)
-theme_override_font_sizes/font_size = 28
-text = "Worlds"
-
-[node name="Subtitle" type="Label" parent="ScrollContainer/VBoxContainer/Header/HeaderLayout" unique_id=1084115831]
-layout_mode = 2
-theme_override_colors/font_color = Color(0.624, 0.671, 0.741, 1)
-theme_override_font_sizes/font_size = 14
-text = "Discover places to play"
-
-[node name="Body" type="PanelContainer" parent="ScrollContainer/VBoxContainer" unique_id=1637881775]
-layout_mode = 2
-size_flags_vertical = 3
-mouse_filter = 1
-theme_override_styles/panel = SubResource("StyleBoxEmpty_body")
-
-[node name="Layout" type="VBoxContainer" parent="ScrollContainer/VBoxContainer/Body" unique_id=139513481]
-layout_mode = 2
-theme_override_constants/separation = 12
-
-[node name="SectionLabel" type="Label" parent="ScrollContainer/VBoxContainer/Body/Layout" unique_id=782336914]
-layout_mode = 2
-theme_override_colors/font_color = Color(0.769, 0.808, 0.875, 1)
-theme_override_font_sizes/font_size = 14
-text = "All places"
-
-[node name="Center" type="CenterContainer" parent="ScrollContainer/VBoxContainer/Body/Layout" unique_id=1062181130]
+[node name="WorldOfTheWeek" parent="Scroll/Content" unique_id=596801693 instance=ExtResource("6_wotwb")]
 layout_mode = 2
 
-[node name="PlacesGrid" type="GridContainer" parent="ScrollContainer/VBoxContainer/Body/Layout/Center" unique_id=1817401922]
+[node name="Margin" type="MarginContainer" parent="Scroll/Content" unique_id=1281278505]
 layout_mode = 2
-theme_override_constants/h_separation = 12
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 24
+
+[node name="PlacesGrid" type="GridContainer" parent="Scroll/Content/Margin" unique_id=347792280 node_paths=PackedStringArray("_scroll")]
+layout_mode = 2
 theme_override_constants/v_separation = 12
-columns = 2
+columns = 3
 script = ExtResource("5_jqfof")
-
-[node name="UsernameField" type="LineEdit" parent="ScrollContainer/VBoxContainer/Body/Layout" unique_id=1312885954]
-layout_mode = 2
-placeholder_text = "Username"
-max_length = 20
-script = ExtResource("6_uname")
+_scroll = NodePath("../../..")

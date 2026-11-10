@@ -191,7 +191,7 @@ public sealed partial class ChatService : Instance
 	[ScriptMethod]
 	public void BroadcastMessage(string msg)
 	{
-		string formatted = FormatEmojis(msg);
+		string formatted = FormatEmojis(FilterService.Filter(msg));
 		MessageReceived.Invoke(formatted);
 		if (HasAuthority)
 			Rpc(nameof(NetRecvBroadcastMessage), formatted);
@@ -200,7 +200,7 @@ public sealed partial class ChatService : Instance
 	[ScriptMethod]
 	public void UnicastMessage(string msg, Player plr)
 	{
-		string formatted = FormatEmojis(msg);
+		string formatted = FormatEmojis(FilterService.Filter(msg));
 		if (plr == Root.Players.LocalPlayer)
 		{
 			MessageReceived.Invoke(formatted);

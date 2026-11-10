@@ -25,11 +25,18 @@ public partial class MobileUI : Control
 		Singleton = this;
 	}
 
+	private const float ViewSlideOffset = 18f;
+	private const int MenuMaxFps = 60;
+	private static readonly MobileViewEnum[] PreloadedViews = [MobileViewEnum.Worlds, MobileViewEnum.PlaceInfo, MobileViewEnum.Profile];
+	public static bool DevToolsEnabled => OS.IsDebugBuild();
+
 	public event Action<MobileViewEnum>? ViewPathSwitched;
 
 	private Control _mainView = null!;
 	public MobileViewBase? CurrentViewNode;
 	public MobileViewEnum CurrentView;
+	private MobileViewEnum _previousView = MobileViewEnum.Home;
+	private Tween? _viewTween;
 
 	[Export] public StartupSplash? StartSplash { get; private set; }
 	[Export] public NewUserSplash NewUserSplash = null!;
@@ -47,14 +54,13 @@ public partial class MobileUI : Control
 
 		AddChild(_deepLink, true);
 
-		GetTree().Root.ContentScaleFactor = (Globals.IsMobileBuild ? Globals.MobileScale : 1f) * MobileSettingsStore.UiScale;
-
 		var initResult = _deepLink.Initialize();
 
 		_deepLink.DeeplinkReceived += OnDeeplinkReceived;
 
 		if (Globals.IsMobileBuild)
 		{
+			GetTree().Root.ContentScaleFactor = Globals.MobileScale * MenuScale;
 			if (Engine.HasSingleton("PolytoriaPermissions"))
 			{
 				GodotObject perms = Engine.GetSingleton("PolytoriaPermissions");
@@ -65,12 +71,18 @@ public partial class MobileUI : Control
 			}
 		}
 
+		DisplayServer.WindowSetVsyncMode(DisplayServer.VSyncMode.Enabled);
+		OS.LowProcessorUsageMode = true;
+		Engine.MaxFps = 0;
+
 		SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
 
 		if (StartSplash != null)
 		{
 			StartSplash!.Visible = true;
 		}
+
+		WorldsCache.Clear();
 
 		PolyMobileAuthAPI.UserAuthenticated += OnUserAuthenticated;
 		PolyMobileAuthAPI.AskForAuthentication += OnAskForAuthentication;
@@ -86,10 +98,11 @@ public partial class MobileUI : Control
 			_ = PolyMobileAuthAPI.LoginWithCodeAndState(mobileCode, mobileState);
 		}
 
-		ApplyThemeColor();
-		MobileSettingsStore.ThemeColorChanged += ApplyThemeColor;
-
 		_mainView = GetNode<Control>("Layout/MainView");
+		if (!DevToolsEnabled)
+		{
+			GetNode("Layout/Navbar/Buttons/Dev").Free();
+		}
 		if (Globals.IsMobileBuild)
 		{
 			DisplayServer.ScreenOrientation orientation = Globals.IsTablet
@@ -104,7 +117,7 @@ public partial class MobileUI : Control
 		{
 			if (Globals.IsInGDEditor)
 			{
-				DisplayServer.WindowSetSize((Vector2I)new Vector2(412, 700));
+				DisplayServer.WindowSetSize(new Vector2I(402, 874));
 			}
 			else if (!Globals.IsMobileBuild)
 			{
@@ -113,7 +126,7 @@ public partial class MobileUI : Control
 		}
 
 		SwitchTo(MobileViewEnum.Home);
-
+		PreloadViews();
 		_ = DismissSplash();
 	}
 
@@ -128,14 +141,9 @@ public partial class MobileUI : Control
 		PolyMobileAuthAPI.UserAuthenticated -= OnUserAuthenticated;
 		PolyMobileAuthAPI.AskForAuthentication -= OnAskForAuthentication;
 		_deepLink.DeeplinkReceived -= OnDeeplinkReceived;
-		MobileSettingsStore.ThemeColorChanged -= ApplyThemeColor;
-		base._ExitTree();
-	}
 
-	private void ApplyThemeColor()
-	{
-		StyleBoxFlat sb = new() { BgColor = MobileSettingsStore.GetBgColor() };
-		AddThemeStyleboxOverride("panel", sb);
+		OS.LowProcessorUsageMode = false;
+		base._ExitTree();
 	}
 
 	private void OnUserAuthenticated(APIMeResponse me)
@@ -195,11 +203,11 @@ public partial class MobileUI : Control
 				PT.PrintErr($"test deeplink missing world: {url}");
 				return;
 			}
-			LaunchInProcessSoloTest(worldPath!, entryPath, debugID, port);
+			LaunchInProcessSoloTest(worldPath!, entryPath, debugID, port, q.Get("spawnpos"), q.Get("spawnrot"));
 		}
 	}
 
-	private void LaunchInProcessSoloTest(string worldPath, string? entryPath, string? debugID, int port)
+	private void LaunchInProcessSoloTest(string worldPath, string? entryPath, string? debugID, int port, string? spawnPos = null, string? spawnRot = null)
 	{
 		Node app = Globals.Singleton.SwitchEntry(Globals.AppEntryEnum.Client);
 		if (app is ClientEntry ce)
@@ -212,6 +220,8 @@ public partial class MobileUI : Control
 				TestIsSolo = true,
 				TestDebugID = debugID,
 				ConnectPort = port,
+				TestSpawnPos = spawnPos,
+				TestSpawnRot = spawnRot,
 			});
 		}
 	}
@@ -259,42 +269,13 @@ public partial class MobileUI : Control
 		}
 	}
 
-	public async void LaunchGame(int placeID)
+	private const float MenuScale = 1.25f;
+
+	private const string JoinError = "PolyDroid 3 cannot join official Polytoria games, instead the PolyDroid 3 client is used for Creator playtests.";
+
+	public void LaunchGame(int placeID)
 	{
-		try
-		{
-			LoadingScreen?.ShowScreen();
-			(bool ready, int port, string? error) = await PolyMobileAuthAPI.WakePlace(placeID);
-			LoadingScreen?.HideScreen();
-			if (!ready)
-			{
-				string text = error switch
-				{
-					null or "" => "Cannot connect to that place.",
-					"timeout" => "The server is taking too long to start. Try again.",
-					"not_found" or "bad_id" => "That place doesn't exist on the server.",
-					"spawn_failed" => "The server failed to start this place.",
-					_ => error,
-				};
-				ShowErrorDialog(text);
-				return;
-			}
-			Node app = Globals.Singleton.SwitchEntry(Globals.AppEntryEnum.Client);
-			if (app is ClientEntry ce)
-			{
-				ce.Entry(new ClientEntry.ClientEntryData
-				{
-					ConnectAddress = Globals.GameServerHost,
-					ConnectPort = port,
-				});
-			}
-		}
-		catch (Exception ex)
-		{
-			PT.PrintErr("LaunchGame failed for placeID=", placeID, ": ", ex);
-			LoadingScreen?.HideScreen();
-			ShowErrorDialog("Could not join: " + ex.Message);
-		}
+		ShowErrorDialog(JoinError);
 	}
 
 	private void ShowErrorDialog(string message)
@@ -304,11 +285,13 @@ public partial class MobileUI : Control
 			DialogText = message,
 			Title = "Couldn't join",
 			Exclusive = true,
+			DialogAutowrap = true,
 		};
+		dialog.GetLabel().AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		dialog.Confirmed += () => dialog.QueueFree();
 		dialog.Canceled += () => dialog.QueueFree();
 		AddChild(dialog);
-		dialog.PopupCentered();
+		dialog.PopupCentered(new Vector2I(480, 0));
 	}
 
 	private void LaunchClientWithToken(string token)
@@ -322,9 +305,27 @@ public partial class MobileUI : Control
 
 	private const double ViewFadeSeconds = 0.16;
 
+	public override void _Notification(int what)
+	{
+		if (what == NotificationWMGoBackRequest && CurrentView == MobileViewEnum.PlaceInfo)
+		{
+			GoBack();
+		}
+	}
+
+	public void GoBack()
+	{
+		SwitchTo(_previousView);
+	}
+
 	public void SwitchTo(MobileViewEnum viewEnum, object? args = null)
 	{
-		if (viewEnum == CurrentView)
+		if (viewEnum == CurrentView && args == null)
+		{
+			return;
+		}
+
+		if (viewEnum == MobileViewEnum.Dev && !DevToolsEnabled)
 		{
 			return;
 		}
@@ -335,25 +336,21 @@ public partial class MobileUI : Control
 		if (!_viewCache.TryGetValue(viewEnum, out MobileViewBase? page))
 		{
 			PT.Print("Loading ", viewEnum);
-			string pathToLoad = viewEnum switch
-			{
-				MobileViewEnum.Home => "res://scenes/mobile/views/home.tscn",
-				MobileViewEnum.Worlds => "res://scenes/mobile/views/worlds.tscn",
-				MobileViewEnum.PlaceInfo => "res://scenes/mobile/views/place_info.tscn",
-				MobileViewEnum.Settings => "res://scenes/mobile/views/settings.tscn",
-				_ => throw new ArgumentOutOfRangeException(nameof(viewEnum),
-					 $"No scene defined for {viewEnum}")
-			};
+			string pathToLoad = GetViewScenePath(viewEnum);
 
-			PT.Print("Loading ", viewEnum);
-
-			PackedScene packed = ResourceLoader.Load<PackedScene>(pathToLoad, cacheMode: ResourceLoader.CacheMode.IgnoreDeep);
+			PackedScene packed = ResourceLoader.Load<PackedScene>(pathToLoad);
 			page = packed.Instantiate<MobileViewBase>();
 			_viewCache[viewEnum] = page;
 			_mainView.AddChild(page);
 			page.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
 		}
 
+		if (CurrentView != MobileViewEnum.PlaceInfo && CurrentView != MobileViewEnum.None)
+		{
+			_previousView = CurrentView;
+		}
+
+		CurrentView = viewEnum;
 		CurrentViewNode = page;
 		CurrentView = viewEnum;
 		page.ShowView(args);
@@ -373,10 +370,42 @@ public partial class MobileUI : Control
 
 		page.Modulate = new Color(1, 1, 1, 0f);
 		page.Visible = true;
-		Tween inTween = CreateTween();
-		inTween.TweenProperty(page, "modulate:a", 1f, ViewFadeSeconds);
-
+		PlayViewEnter(page);
 		ViewPathSwitched?.Invoke(viewEnum);
+	}
+
+	private static string GetViewScenePath(MobileViewEnum viewEnum)
+	{
+		return viewEnum switch
+		{
+			MobileViewEnum.Home => "res://scenes/mobile/views/home.tscn",
+			MobileViewEnum.Worlds => "res://scenes/mobile/views/worlds.tscn",
+			MobileViewEnum.PlaceInfo => "res://scenes/mobile/views/place_info.tscn",
+			MobileViewEnum.Avatar => "res://scenes/mobile/views/avatar.tscn",
+			MobileViewEnum.Dev => "res://scenes/mobile/views/test.tscn",
+			MobileViewEnum.Profile => "res://scenes/mobile/views/profile.tscn",
+			_ => throw new ArgumentOutOfRangeException(nameof(viewEnum),
+				 $"No scene defined for {viewEnum}")
+		};
+	}
+
+	private static void PreloadViews()
+	{
+		foreach (MobileViewEnum view in PreloadedViews)
+		{
+			ResourceLoader.LoadThreadedRequest(GetViewScenePath(view), useSubThreads: true);
+		}
+	}
+
+	private void PlayViewEnter(Control page)
+	{
+		_viewTween?.Kill();
+		page.Modulate = new(1, 1, 1, 0);
+		page.Position = new(0, ViewSlideOffset);
+
+		_viewTween = CreateTween().SetParallel().SetEase(Tween.EaseType.Out).SetTrans(Tween.TransitionType.Cubic);
+		_viewTween.TweenProperty(page, "modulate:a", 1f, 0.2f);
+		_viewTween.TweenProperty(page, "position:y", 0f, 0.3f);
 	}
 }
 
@@ -385,6 +414,9 @@ public enum MobileViewEnum
 	None,
 	Home,
 	Worlds,
-	Settings,
-	PlaceInfo
+	Avatar,
+	Store,
+	Dev,
+	PlaceInfo,
+	Profile
 }

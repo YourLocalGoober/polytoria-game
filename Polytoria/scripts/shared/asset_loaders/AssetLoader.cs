@@ -4,6 +4,7 @@
 
 using Godot;
 using Polytoria.Providers.AssetLoaders;
+using Polytoria.Shared.Settings;
 using System;
 using System.Collections.Concurrent;
 using System.Threading;
@@ -15,7 +16,7 @@ public partial class AssetLoader : Node
 {
 
 	private readonly record struct AssetCacheKey(ResourceType Type, uint ID, Vector2I? Resize);
-	private const int DefaultMaxConcurrentRequests = 8;
+	private static readonly int DefaultMaxConcurrentRequests = (int)SharedSettingsRegistry.Definitions[SharedSettingKeys.Advanced.AssetQueue].UntypedDefault;
 
 	public AssetLoader()
 	{
@@ -111,6 +112,9 @@ public partial class AssetLoader : Node
 		{
 			CacheItem result = await task;
 			Callable.From(() => callback(result)).CallDeferred();
+		}
+		catch (OperationCanceledException) when (Globals.IsExiting)
+		{
 		}
 		catch (Exception exception)
 		{

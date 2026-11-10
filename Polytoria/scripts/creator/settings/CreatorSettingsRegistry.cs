@@ -18,7 +18,6 @@ public static class CreatorSettingsRegistry
 		new() { Key = "display", Label = "Display", IconPath = "res://assets/textures/ui-icons/camera.svg", SortOrder = 2 },
 		new() { Key = "graphics", Label = "Graphics", IconPath = "res://assets/textures/ui-icons/mountain.svg", SortOrder = 3 },
 		new() { Key = "post_processing", Label = "Post Processing", IconPath = "res://assets/textures/ui-icons/rocket.svg", SortOrder = 4 },
-		new() { Key = "ray_tracing", Label = "Ray Tracing", IconPath = "res://assets/textures/ui-icons/raytrace.svg", SortOrder = 5 },
 		new() { Key = "backup", Label = "Backup", IconPath = DefaultSectionIcon, SortOrder = 6 },
 		new() { Key = "code_editor", Label = "Code Editor", IconPath = DefaultSectionIcon, SortOrder = 7 },
 		new() { Key = "popups", Label = "Popups", IconPath = DefaultSectionIcon, SortOrder = 8 },
@@ -148,6 +147,24 @@ public static class CreatorSettingsRegistry
 				MinValue = 1,
 				MaxValue = 8,
 				Step = 1,
+				Conditions = [
+					new SettingCondition<PreferredEditorEnum>() {
+						Target = CreatorSettingKeys.CodeEditor.PreferredEditor,
+						Predicate = x => x == PreferredEditorEnum.BuiltIn
+					}
+				]
+			});
+
+		defs.Add(CreatorSettingKeys.CodeEditor.FormatOnSave,
+			new SettingDef<bool>
+			{
+				Key = CreatorSettingKeys.CodeEditor.FormatOnSave,
+				SectionKey = "code_editor",
+				Label = "Format on save",
+				Description = "When enabled, the editor will automatically format scripts on save.",
+				ValueKind = SettingValueKind.Bool,
+				ControlKind = SettingControlKind.Toggle,
+				DefaultValue = false,
 				Conditions = [
 					new SettingCondition<PreferredEditorEnum>() {
 						Target = CreatorSettingKeys.CodeEditor.PreferredEditor,

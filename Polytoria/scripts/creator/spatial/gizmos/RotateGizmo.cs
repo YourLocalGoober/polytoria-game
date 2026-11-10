@@ -177,12 +177,19 @@ public partial class RotateGizmo : Node, IGizmo
 
 	public override void _Process(double delta)
 	{
+		if (_isMouseDragging && !Input.IsMouseButtonPressed(MouseButton.Left))
+		{
+			DragEnded?.Invoke();
+			_isMouseDragging = false;
+		}
+
 		SetVisiblity();
 		RedrawGizmo();
 	}
 
 	public override void _Input(InputEvent @event)
 	{
+		if (Gizmos.IsJoystickPointer(GetViewport(), @event)) return;
 		if (Targets.Count == 0) return;
 
 		Vector2 mousePos = GDCamera.GetViewport().GetMousePosition();

@@ -214,7 +214,11 @@ public partial class CreatorSession : Node, IDisposable
 
 			PT.Print("Writing doc...");
 			File.WriteAllText(versionPath, Globals.AppVersion);
-			File.WriteAllText(luauRcPath, LuauRCContent);
+
+			if (!File.Exists(luauRcPath))
+			{
+				File.WriteAllText(luauRcPath, LuauRCContent);
+			}
 		}
 	}
 
@@ -267,6 +271,7 @@ public partial class CreatorSession : Node, IDisposable
 			netService.IsServer = true;
 		}
 
+		root.Root = root;
 		root.InitEntry();
 
 		root.GDNode.AddChild(dmBridge, true, Node.InternalMode.Back);
@@ -303,7 +308,6 @@ public partial class CreatorSession : Node, IDisposable
 
 		dmBridge.Attach(root, worldOverride != null);
 
-		root.Root = root;
 		root.Setup();
 
 		SyncFileIndex();

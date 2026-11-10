@@ -289,6 +289,9 @@ public partial class UIChat : Control
 			label.Content = msg;
 			return;
 		}
+
+		if (from.IsMuted) return;
+
 		NewChatMessage(from, msg);
 	}
 
@@ -406,8 +409,8 @@ public partial class UIChat : Control
 			_chatPanel.Size = new Vector2(clampedX, clampedY);
 
 		Vector2 pos = Position;
-		float newX = Mathf.Clamp(pos.X, 0, viewSize.X - clampedX - 16);
-		float newY = Mathf.Clamp(pos.Y, 0, viewSize.Y - clampedY - 16);
+		float newX = Mathf.Clamp(pos.X, 0, Mathf.Max(0, viewSize.X - clampedX - 16));
+		float newY = Mathf.Clamp(pos.Y, 0, Mathf.Max(0, viewSize.Y - clampedY - 16));
 
 		if (pos.X != newX || pos.Y != newY)
 			Position = new Vector2(newX, newY);
@@ -524,7 +527,8 @@ public partial class UIChat : Control
 
 	private void InsertEmojiAtCursor(string emojiName)
 	{
-		if (!Input.IsKeyPressed(Key.Shift))
+		bool keepOpen = Input.IsKeyPressed(Key.Shift) || (IsTouch && !_isAutocompleteOpen);
+		if (!keepOpen)
 			CloseEmojiPicker();
 
 		_suppressAutocomplete = true;
@@ -537,6 +541,9 @@ public partial class UIChat : Control
 		{
 			_suppressAutocomplete = false;
 		}
-		_chatField.GrabFocus();
+		if (!IsTouch)
+			_chatField.GrabFocus();
 	}
+
+	private static bool IsTouch => Polytoria.Shared.Globals.IsMobileBuild || DisplayServer.IsTouchscreenAvailable();
 }

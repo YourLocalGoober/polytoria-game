@@ -99,21 +99,7 @@ public partial class CreatorInterface : Control, IScriptObject
 	public override void _Ready()
 	{
 		_creatorTheme = ResourceLoader.Load<Theme>(CreatorThemePath, cacheMode: ResourceLoader.CacheMode.IgnoreDeep);
-		if (Polytoria.Shared.Globals.IsMobileBuild)
-		{
-			LastFilePromptFolder = "user://";
-		}
-		else
-		{
-			try
-			{
-				LastFilePromptFolder = System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments);
-			}
-			catch
-			{
-				LastFilePromptFolder = "user://";
-			}
-		}
+		LastFilePromptFolder = CreatorService.DocumentsFolder;
 
 		Theme = _creatorTheme;
 
@@ -669,10 +655,19 @@ public partial class CreatorInterface : Control, IScriptObject
 			window.Transient = false;
 			window.TransientToFocused = false;
 			window.Exclusive = false;
+			MakeTouchFriendly(window);
 			parent.AddChild(window);
 
 			Vector2I size = window.Size;
-			if (size.X < 200 || size.Y < 200) size = new Vector2I(800, 600);
+			if (window is AcceptDialog)
+			{
+				Vector2 min = window.GetContentsMinimumSize();
+				size = new Vector2I(Mathf.Max(420, (int)min.X + 48), Mathf.Max(200, (int)min.Y + 64));
+			}
+			else if (size.X < 200 || size.Y < 200)
+			{
+				size = new Vector2I(800, 600);
+			}
 			window.Size = size;
 
 			Vector2 vpSize = root != null ? root.GetVisibleRect().Size : new Vector2(DisplayServer.WindowGetSize(0).X, DisplayServer.WindowGetSize(0).Y);
@@ -692,6 +687,69 @@ public partial class CreatorInterface : Control, IScriptObject
 
 		parent.AddChild(window);
 		window.PopupCentered();
+	}
+
+	private const int TouchFontSize = 20;
+	private const int TouchTitleHeight = 44;
+	private const int TouchCloseSize = 28;
+	private const string CloseSvg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"28\" height=\"28\"><path d=\"M8 8l12 12M20 8L8 20\" stroke=\"{0}\" stroke-width=\"2.6\" stroke-linecap=\"round\" fill=\"none\"/></svg>";
+
+	private static ImageTexture CloseIcon(string color)
+	{
+		Image img = new();
+		img.LoadSvgFromString(string.Format(CloseSvg, color), 2f);
+		ImageTexture tex = ImageTexture.CreateFromImage(img);
+		tex.SetSizeOverride(new Vector2I(TouchCloseSize, TouchCloseSize));
+		return tex;
+	}
+
+	private Theme? _touchDialogTheme;
+
+	private Theme TouchDialogTheme()
+	{
+		if (_touchDialogTheme != null) return _touchDialogTheme;
+		Theme theme = (Theme)_creatorTheme.Duplicate();
+		theme.DefaultFontSize = TouchFontSize;
+		foreach (string type in new[] { "Label", "Button", "CheckBox", "CheckButton", "LineEdit", "OptionButton" })
+		{
+			theme.SetFontSize("font_size", type, TouchFontSize);
+		}
+		_touchDialogTheme = theme;
+		return theme;
+	}
+
+	private void MakeTouchFriendly(Window window)
+	{
+		int grow = TouchTitleHeight - window.GetThemeConstant("title_height");
+		if (grow > 0)
+		{
+			foreach (string style in new[] { "embedded_border", "embedded_unfocused_border" })
+			{
+				if (window.GetThemeStylebox(style)?.Duplicate() is StyleBox box)
+				{
+					if (box is StyleBoxFlat flat) flat.ExpandMarginTop += grow;
+					else if (box is StyleBoxTexture texture) texture.ExpandMarginTop += grow;
+					window.AddThemeStyleboxOverride(style, box);
+				}
+			}
+			window.AddThemeConstantOverride("title_height", TouchTitleHeight);
+		}
+
+		window.AddThemeFontSizeOverride("title_font_size", TouchFontSize);
+		window.AddThemeIconOverride("close", CloseIcon("#c8c8c8"));
+		window.AddThemeIconOverride("close_pressed", CloseIcon("#ffffff"));
+		window.AddThemeConstantOverride("close_h_offset", TouchCloseSize + 10);
+		window.AddThemeConstantOverride("close_v_offset", TouchCloseSize + (TouchTitleHeight - TouchCloseSize) / 2);
+
+		if (window is AcceptDialog dialog)
+		{
+			dialog.Theme = TouchDialogTheme();
+			dialog.GetOkButton().CustomMinimumSize = new Vector2(140, 48);
+			if (dialog is ConfirmationDialog confirm)
+			{
+				confirm.GetCancelButton().CustomMinimumSize = new Vector2(140, 48);
+			}
+		}
 	}
 
 	public InsertMenuPopup OpenInsertMenu(Instance? insertTo = null)
@@ -748,6 +806,12 @@ public partial class CreatorInterface : Control, IScriptObject
 		if (string.IsNullOrEmpty(raw)) return raw;
 		if (!raw.StartsWith("content://")) return raw;
 
+		string? storagePath = MapStorageUri(raw);
+		if (storagePath != null && (mode == DisplayServer.FileDialogMode.SaveFile || File.Exists(storagePath) || Directory.Exists(storagePath)))
+		{
+			return storagePath;
+		}
+
 		Godot.DirAccess.MakeDirRecursiveAbsolute(SafCacheDir);
 
 		string decoded = Uri.UnescapeDataString(raw);
@@ -794,6 +858,28 @@ public partial class CreatorInterface : Control, IScriptObject
 				return fallback;
 			}
 		}
+	}
+
+	private static string? MapStorageUri(string raw)
+	{
+		if (!CreatorService.HasAllFilesAccess()) return null;
+		if (!Uri.TryCreate(raw, UriKind.Absolute, out Uri? uri)) return null;
+		if (uri.Host != "com.android.externalstorage.documents") return null;
+
+		string path = Uri.UnescapeDataString(uri.AbsolutePath);
+		int doc = path.LastIndexOf("/document/", StringComparison.Ordinal);
+		int tree = path.IndexOf("/tree/", StringComparison.Ordinal);
+		string id;
+		if (doc >= 0) id = path[(doc + "/document/".Length)..];
+		else if (tree >= 0) id = path[(tree + "/tree/".Length)..];
+		else return null;
+
+		int colon = id.IndexOf(':');
+		if (colon < 0) return null;
+		string volume = id[..colon];
+		string rel = id[(colon + 1)..].Trim('/');
+		string root = volume == "primary" ? "/storage/emulated/0" : "/storage/" + volume;
+		return rel.Length == 0 ? root : root + "/" + rel;
 	}
 
 	private async Task ScheduleSafWriteBack(string localAbsPath, string contentUri)

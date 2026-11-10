@@ -19,12 +19,8 @@ using Polytoria.Shared;
 using Polytoria.Utils;
 using Polytoria.Utils.DTOs;
 using System;
-using System.Buffers;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
-using System.Linq.Expressions;
-using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -35,15 +31,16 @@ namespace Polytoria.Datamodel.Services;
 [ExplorerExclude, SaveIgnore, Internal]
 public sealed partial class NetworkService : Instance
 {
-	private static readonly ConcurrentDictionary<(Type Type, int MethodId), RpcDispatchInfo> _rpcDispatchCache = new();
-
 	private const int PingIntervalMs = 250; // Ping interval
 	private const int AuthWaitTimeoutSec = 15; // Time wait before user disconnects due to auth timeout
 	private const int HeartbeatIntervalSec = 10; // Server heartbeat interval
 	private const int HeartbeatBeforeCheckPlayers = 5; // Server wait before checking players
 	private const double NetKeepaliveIntervalSec = 1.0;
 	private static readonly byte[] _netKeepalivePacket = [NetworkInstance.KeepaliveMarker];
-	private const float ConnectTimeoutSec = 90; // Timeout kick if player is not ready
+	private const float ConnectTimeoutSec = 90; // Timeout kick if player stops loading
+	private const float MaxConnectTimeSec = 600;
+	private const float LoadProgressIntervalSec = 5;
+	private const int NetObjDispatchTimeoutMs = 10000; // Time wait before NetObj dispatch is dropped
 
 	// TODO: Narrow this down
 	private const int MaxBroadcastPacketPerSec = 100;
@@ -53,14 +50,14 @@ public sealed partial class NetworkService : Instance
 	public const string IntegrityFailureMessage = "Integrity failure, please update your client.";
 	public const string NetworkModeMismatchMessage = "Network mode mismatch.";
 	public const string MultipleDeviceMessage = "Another device is already playing using this account, please leave the game first then try again.";
+	public const string OtherDeviceMessage = "This account joined the game from another device.";
 	public const string ConnectTimeoutMessage = "Connection timeout";
+	private const int MaxServerPhysicsSteps = 4;
 
 	private static readonly Dictionary<NetworkInstance.NetInstanceErrorEnum, string> _netInstanceErrorMessages = new()
 	{
 		{ NetworkInstance.NetInstanceErrorEnum.DataChannelConnectFailure, "Couldn't connect to the data channel, please try rejoining" }
 	};
-
-	private const ENetConnection.CompressionMode CompressionMode = ENetConnection.CompressionMode.Fastlz;
 
 	public event Action? ServerStarted;
 	public event Action? ClientWorldReady;
@@ -79,6 +76,8 @@ public sealed partial class NetworkService : Instance
 	public bool IsDisconnected = false;
 	public bool IsShuttingDown = false;
 	public bool ClientConnected = false;
+	private bool _clientReady;
+	private readonly Dictionary<int, (int Count, double Time)> _loadProgress = [];
 
 
 	// Rate limiters
@@ -140,7 +139,40 @@ public sealed partial class NetworkService : Instance
 
 	public override void PreDelete()
 	{
+		IsShuttingDown = true;
 		Globals.BeforeQuit -= BeforeQuitHandler;
+
+		if (NetInstance != null)
+		{
+			NetInstance.PeerConnected -= OnPeerConnected;
+			NetInstance.PeerDisconnected -= OnPeerDisconnected;
+			NetInstance.ClientConnected -= ConnectedToServer;
+			NetInstance.ClientError -= ConnectionFailed;
+			NetInstance.ClientDisconnected -= ServerDisconnected;
+			NetInstance.MessageReceived -= OnMessageRecv;
+			NetInstance.Shutdown();
+			NetInstance = null;
+		}
+
+		if (_heartbeatTimer != null && GodotObject.IsInstanceValid(_heartbeatTimer))
+		{
+			_heartbeatTimer.Timeout -= ServerSendHeartbeat;
+			_heartbeatTimer.Stop();
+			_heartbeatTimer.QueueFree();
+		}
+
+		if (_players != null)
+		{
+			_players.PlayerAdded.Disconnect(OnPlayerAdded);
+			_players.PlayerRemoved.Disconnect(OnPlayerRemoved);
+		}
+
+		ActivePeerIDs.Clear();
+		_pendingReplications.Clear();
+		lock (_rateLimiterLock)
+		{
+			_peerRateLimiters.Clear();
+		}
 
 		// Null all events
 		ServerStarted = null;
@@ -178,92 +210,46 @@ public sealed partial class NetworkService : Instance
 		NetInstance?.MessageReceived += OnMessageRecv;
 	}
 
-	private static RpcDispatchInfo GetDispatchInfo(NetworkedObject target, int methodId)
-	{
-		Type targetType = target.GetType();
-
-		return _rpcDispatchCache.GetOrAdd((targetType, methodId), (key) =>
-		{
-			MethodInfo method = target.GetRpcMethod(methodId);
-			NetRpcAttribute attribute = method.GetCustomAttribute<NetRpcAttribute>() ?? throw new NetworkException($"Tried to call Rpc function which is not marked as Rpc ({method.Name})");
-			Type[] parameterTypes = [.. method.GetParameters().Select(p => p.ParameterType)];
-
-			Action<NetworkedObject, object?[]?> invoker = CreateInvoker(method);
-
-			return new RpcDispatchInfo()
-			{
-				Method = method,
-				Attribute = attribute,
-				ParameterTypes = parameterTypes,
-				Invoke = invoker
-			};
-		});
-	}
-
-	private static Action<NetworkedObject, object?[]?> CreateInvoker(MethodInfo method)
-	{
-		ParameterExpression targetParam = System.Linq.Expressions.Expression.Parameter(typeof(NetworkedObject), "target");
-		ParameterExpression argsParam = System.Linq.Expressions.Expression.Parameter(typeof(object[]), "args");
-
-		Type declaringType = method.DeclaringType ?? throw new InvalidOperationException("Method has no declaring type");
-		UnaryExpression castTarget = System.Linq.Expressions.Expression.Convert(targetParam, declaringType);
-
-		ParameterInfo[] parameters = method.GetParameters();
-		System.Linq.Expressions.Expression[] callArgs = new System.Linq.Expressions.Expression[parameters.Length];
-
-		for (int i = 0; i < parameters.Length; i++)
-		{
-			var indexExpr = System.Linq.Expressions.Expression.ArrayIndex(argsParam, System.Linq.Expressions.Expression.Constant(i));
-			callArgs[i] = System.Linq.Expressions.Expression.Convert(indexExpr, parameters[i].ParameterType);
-		}
-
-		MethodCallExpression call = System.Linq.Expressions.Expression.Call(castTarget, method, callArgs);
-		System.Linq.Expressions.Expression body = method.ReturnType == typeof(void) ? call : System.Linq.Expressions.Expression.Block(call, System.Linq.Expressions.Expression.Empty());
-
-		return System.Linq.Expressions.Expression.Lambda<Action<NetworkedObject, object?[]?>>(body, targetParam, argsParam).Compile();
-	}
-
-	private static void ValidateAuthority(NetRpcAttribute rpcAttr, MethodInfo md, NetworkedObject netObj, int originFromPeer, TransferMode tfm, InternalNetMsg netMsg)
+	private static void ValidateAuthority(RpcDispatchEntry entry, NetworkedObject netObj, int originFromPeer, TransferMode tfm, InternalNetMsg.InternalNetMsgPayload netMsg)
 	{
 		// Check if packet flag matches
-		if (rpcAttr.TransferMode == TransferMode.Reliable && tfm != TransferMode.Reliable) throw new NetworkException($"Flag mismatch (expected {rpcAttr.TransferMode} but got {tfm}) ({md.Name})");
+		if (entry.TransferMode == TransferMode.Reliable && tfm != TransferMode.Reliable) throw new NetworkException($"Flag mismatch (expected {entry.TransferMode} but got {tfm}) ({entry.Name})");
 
-		if (rpcAttr.AuthorMode == AuthorityMode.Server)
+		if (entry.AuthorMode == AuthorityMode.Server)
 		{
 			// Check if is server
-			if (originFromPeer != 1) throw new NetworkException($"Invalid authority, author mode is Server but is from peer {originFromPeer} ({md.Name})");
+			if (originFromPeer != 1) throw new NetworkException($"Invalid authority, author mode is Server but is from peer {originFromPeer} ({entry.Name})");
 		}
-		else if (rpcAttr.AuthorMode == AuthorityMode.Authority)
+		else if (entry.AuthorMode == AuthorityMode.Authority)
 		{
 			// Check if is authority
-			if (originFromPeer != 1 && originFromPeer != netObj.NetworkAuthority) throw new NetworkException($"Invalid authority, author is {netObj.NetworkAuthority} but is from peer {originFromPeer} ({md.Name})");
+			if (originFromPeer != 1 && originFromPeer != netObj.NetworkAuthority) throw new NetworkException($"Invalid authority, author is {netObj.NetworkAuthority} but is from peer {originFromPeer} ({entry.Name})");
 		}
-		else if (rpcAttr.AuthorMode == AuthorityMode.Any)
+		else if (entry.AuthorMode == AuthorityMode.Any)
 		{
 			// Check if is authority
-			if (originFromPeer != 1 && netMsg.BroadcastAll && rpcAttr.AllowToServerOnly) throw new NetworkException($"Broadcast to server only rule violation, from peer {originFromPeer} ({md.Name})");
+			if (originFromPeer != 1 && netMsg.BroadcastAll && entry.AllowToServerOnly) throw new NetworkException($"Broadcast to server only rule violation, from peer {originFromPeer} ({entry.Name})");
 		}
 	}
 
-	private async void OnMessageRecv(int fromPeer, byte[] data, TransferMode tfm)
+	private void OnMessageRecv(int fromPeer, byte[] data, TransferMode tfm)
 	{
 		if (NetInstance == null) return;
-#if DEBUG
-		string netDebugTrace = "";
-#endif
 		try
 		{
-			InternalNetMsg netMsg = InternalNetMsg.Deserialize(data);
-#if DEBUG
-			netDebugTrace = netMsg.StackTrace;
-#endif
-			int originFromPeer = (fromPeer == 1 && netMsg.OriginSender != 0) ? netMsg.OriginSender : fromPeer;
+			InternalNetMsg.InternalNetMsgPayload netMsg = SerializeUtils.Deserialize<InternalNetMsg.InternalNetMsgPayload>(data)
+				?? throw new NetworkException("Message is invalid");
 
 			NetworkedObject? netObj = null;
 			if (netMsg.Target.StartsWith("i:"))
 			{
-				// Newly created object may not be available, wait for them for a bit.
-				netObj = await Root.WaitForNetObjectAsync(netMsg.Target.TrimPrefix("i:"), timeoutMs: 10000);
+				string networkId = netMsg.Target[2..];
+				netObj = Root.GetNetObjectFromID(networkId);
+				if (netObj == null || !netObj.IsPropReady)
+				{
+					DispatchWhenReady(fromPeer, netMsg, tfm, networkId);
+					return;
+				}
 			}
 			else
 			{
@@ -271,11 +257,48 @@ public sealed partial class NetworkService : Instance
 			}
 
 			if (netObj == null) return;
+			DispatchMessage(fromPeer, netMsg, tfm, netObj);
+		}
+		catch (Exception ex)
+		{
+			if (OS.IsDebugBuild())
+			{
+				PT.PrintErr("Invalid Packet: ", ex);
+			}
+		}
+	}
 
-			RpcDispatchInfo dispatch = GetDispatchInfo(netObj, netMsg.TargetMethod);
-			ValidateAuthority(dispatch.Attribute, dispatch.Method, netObj, originFromPeer, tfm, netMsg);
+	private async void DispatchWhenReady(int fromPeer, InternalNetMsg.InternalNetMsgPayload netMsg, TransferMode tfm, string networkId)
+	{
+		try
+		{
+			NetworkedObject? netObj = await Root.WaitForNetObjectAsync(networkId, NetObjDispatchTimeoutMs);
+			if (netObj != null)
+			{
+				DispatchMessage(fromPeer, netMsg, tfm, netObj);
+			}
+			else
+			{
+				GD.PushWarning($"Deferred packet dropped, NetworkedObject with ID {networkId} did not exist or was not ready within {NetObjDispatchTimeoutMs}ms of dispatch");
+			}
+		}
+		catch (Exception ex)
+		{
+			if (OS.IsDebugBuild())
+			{
+				PT.PrintErr("Invalid deferred packet: ", ex, "\nOrigin stack trace: ", netMsg.StackTrace);
+			}
+		}
+	}
 
-			Type[] paramTypes = dispatch.ParameterTypes;
+	private void DispatchMessage(int fromPeer, InternalNetMsg.InternalNetMsgPayload netMsg, TransferMode tfm, NetworkedObject netObj)
+	{
+		try
+		{
+			int originFromPeer = (fromPeer == 1 && netMsg.OriginSender != 0) ? netMsg.OriginSender : fromPeer;
+
+			RpcDispatchEntry dispatch = RpcDispatchRegistry.GetEntry(netObj.GetType(), netMsg.TargetMethod);
+			ValidateAuthority(dispatch, netObj, originFromPeer, tfm, netMsg);
 
 			if (netMsg.BroadcastAll && IsServer)
 			{
@@ -285,7 +308,7 @@ public sealed partial class NetworkService : Instance
 				{
 					lock (_rateLimiterLock)
 					{
-						var rateLimiter = _peerRateLimiters[originFromPeer];
+						if (!_peerRateLimiters.TryGetValue(originFromPeer, out var rateLimiter)) return;
 						if (tfm == TransferMode.Reliable)
 						{
 							canSend = rateLimiter.Reliable.TryAccept();
@@ -306,55 +329,49 @@ public sealed partial class NetworkService : Instance
 
 				if (canSend)
 				{
-					if (Globals.UseLogRPC) PT.Print($"Broadcast {dispatch.Method.Name} from {originFromPeer} to all");
-					NetInstance.BroadcastMessage(netMsg.Serialize(), dispatch.Attribute.TransferMode, dispatch.Attribute.TransferChannel, [originFromPeer]);
+					if (Globals.UseLogRPC) PT.Print($"Broadcast {dispatch.Name} from {originFromPeer} to all");
+					NetInstance!.BroadcastMessageExcept(SerializeUtils.Serialize(netMsg), dispatch.TransferMode, dispatch.TransferChannel, originFromPeer);
 				}
 				else
 				{
-					if (Globals.UseLogRPC) PT.Print($"Blocked {dispatch.Method.Name} from {originFromPeer}");
+					if (Globals.UseLogRPC) PT.Print($"Blocked {dispatch.Name} from {originFromPeer}");
 					return;
 				}
 			}
 
 			if (originFromPeer == LocalPeerID) return;
+
 			netObj.RemoteSenderId = originFromPeer;
-
-			object?[] args = ArrayPool<object?>.Shared.Rent(dispatch.ParameterTypes.Length);
-
 			try
 			{
-				for (int i = 0; i < dispatch.ParameterTypes.Length; i++)
-				{
-					args[i] = NetworkPropSync.DeserializePropValue(netMsg.ByteArrays[i], dispatch.ParameterTypes[i]);
-				}
-
-				netObj.RemoteSenderId = originFromPeer;
-				dispatch.Invoke(netObj, args);
+				dispatch.InvokeWire(netObj, netMsg.ByteArrays);
 			}
 			catch (Exception ex)
 			{
-				PT.PrintErr(dispatch.Method.Name, " invoke failure: ", ex);
+				if (OS.IsDebugBuild())
+				{
+					PT.PrintErr(dispatch.Name, " invoke failure: ", ex);
+				}
 			}
 			finally
 			{
 				netObj.RemoteSenderId = 0;
-				Array.Clear(args, 0, dispatch.ParameterTypes.Length);
-				ArrayPool<object?>.Shared.Return(args);
 			}
 		}
 		catch (Exception ex)
 		{
-#if DEBUG
-			PT.PrintErr("Invalid Packet: ", ex, "\nOrigin stack trace: ", netDebugTrace);
-#else
-			PT.PrintErr("Invalid Packet: ", ex);
-#endif
+			if (OS.IsDebugBuild())
+			{
+				PT.PrintErr("Invalid Packet: ", ex, "\nOrigin stack trace: ", netMsg.StackTrace);
+			}
 		}
 	}
 
 	public void CreateServer(int port = 24221)
 	{
+		Engine.MaxPhysicsStepsPerFrame = MaxServerPhysicsSteps;
 		SetupNetwork();
+		RuntimeHelpers.RunClassConstructor(typeof(PropSyncRegistry).TypeHandle);
 		InitNodes();
 		Root.ListenToNetworkService();
 
@@ -383,10 +400,9 @@ public sealed partial class NetworkService : Instance
 
 		if (IsProd)
 		{
-			_heartbeatTimer = new();
+			_heartbeatTimer = new() { OneShot = true };
 			Globals.Singleton.AddChild(_heartbeatTimer);
 			_heartbeatTimer.Timeout += ServerSendHeartbeat;
-			_heartbeatTimer.Start(HeartbeatIntervalSec);
 			ServerSendHeartbeat();
 		}
 
@@ -489,11 +505,15 @@ public sealed partial class NetworkService : Instance
 
 	private async void ServerSendHeartbeat()
 	{
+		if (IsShuttingDown) return;
 		_heartbeatCount++;
-		APIHeartbeatResponse res = await PolyServerAPI.SendHeartbeat(World.Current!.Players.GetPlayerIDArray());
-		if (res.Remove.Count > 0)
+
+		try
 		{
-			foreach (int r in res.Remove)
+			APIHeartbeatResponse res = await PolyServerAPI.SendHeartbeat(Root.Players.GetPlayerIDArray());
+			if (IsShuttingDown || IsDeleted) return;
+
+			foreach (int r in res.Remove ?? [])
 			{
 				Player? player = Root.Players.GetPlayerByID(r);
 				if (player != null)
@@ -502,18 +522,24 @@ public sealed partial class NetworkService : Instance
 				}
 			}
 		}
-
-		// Check for players in the server
-		if (_heartbeatCount > HeartbeatBeforeCheckPlayers)
+		catch (Exception ex)
 		{
-			if (World.Current.Players.AbsolutePlayersCount <= 0)
+			PT.PrintErr("Server heartbeat failure: ", ex);
+		}
+		finally
+		{
+			if (!IsShuttingDown && GodotObject.IsInstanceValid(_heartbeatTimer))
 			{
-				PT.Print("No players, shutting down");
-				ShutdownServer();
+				_heartbeatTimer.Start(HeartbeatIntervalSec);
 			}
 		}
 
-		_heartbeatTimer.Start(HeartbeatIntervalSec);
+		// Check for players in the server
+		if (_heartbeatCount > HeartbeatBeforeCheckPlayers && Root.Players.AbsolutePlayersCount <= 0)
+		{
+			PT.Print("No players, shutting down");
+			ShutdownServer();
+		}
 	}
 
 	private void ServerSendNetKeepalive()
@@ -564,6 +590,7 @@ public sealed partial class NetworkService : Instance
 		RpcId(peerID, nameof(NetRequestAuth), peerID);
 
 		await Globals.Singleton.WaitAsync(AuthWaitTimeoutSec);
+		if (IsShuttingDown || IsDeleted) return;
 		Player? plr = _players.GetPlayerFromPeerID(peerID);
 		if (plr == null)
 		{
@@ -578,6 +605,7 @@ public sealed partial class NetworkService : Instance
 		{
 			_peerRateLimiters.Remove(peerID);
 		}
+		TransformSync.ForgetPeer(peerID);
 
 		Player? plr = _players.GetPlayerFromPeerID(peerID);
 		if (plr != null)
@@ -587,27 +615,22 @@ public sealed partial class NetworkService : Instance
 
 			_players.InvokePlayerRemoved(plr);
 			plr.ForceDelete();
-		}
-	}
 
-	private void EvictStalePlayer(Player? stale, int incomingPeerID)
-	{
-		if (stale == null || stale.IsDeleted) return;
-		if (stale.PeerID == incomingPeerID) return;
-		if (NetInstance != null && stale.PeerID != 0)
-		{
-			// graceful disconnect because forcing it corrupts the incoming peer's ENet slot and leaves them stuck on "Downloading world..."
-			NetInstance.DisconnectPeer(stale.PeerID, false);
+			foreach (NetworkedObject obj in Root.NetworkObjects.Values)
+			{
+				if (obj is Physical p && p.NetTransformAuthority == peerID)
+				{
+					p.SetNetworkAuthority(null);
+				}
+			}
 		}
-		_players.PeerIDToPlayer.Remove(stale.PeerID);
-		_players.InvokePlayerRemoved(stale);
-		stale.ForceDelete();
 	}
 
 	internal async void DisconnectPeer(int peerID, string reason = "", DisconnectionCodeEnum code = DisconnectionCodeEnum.Kicked)
 	{
 		RpcId(peerID, nameof(NetRecvDisconnect), reason, (int)code);
 		await Globals.Singleton.WaitAsync(3);
+		if (IsShuttingDown || IsDeleted) return;
 		NetInstance?.DisconnectPeer(peerID, true);
 	}
 
@@ -622,6 +645,7 @@ public sealed partial class NetworkService : Instance
 		if (IsDisconnected) return;
 		PT.Print("Shutting down network instance.");
 		IsDisconnected = true;
+		IsShuttingDown = true;
 		NetInstance?.Shutdown();
 		Callable.From(() =>
 		{
@@ -739,14 +763,22 @@ public sealed partial class NetworkService : Instance
 		}
 
 		// If no longer in the game after authentication, stop here
-		if (!NetInstance.IsPeerConnected(peerID)) return;
+		if (IsShuttingDown || IsDeleted || NetInstance == null || !NetInstance.IsPeerConnected(peerID)) return;
 
 		string username = userData.Username;
 
-		EvictStalePlayer(_players.GetPlayer(username), peerID);
-		EvictStalePlayer(_players.GetPlayerByID(userData.Id), peerID);
-		Player? staleByPeer = _players.GetPlayerFromPeerID(peerID);
-		if (staleByPeer != null && staleByPeer.Name != username) EvictStalePlayer(staleByPeer, peerID);
+		// Check for existing player
+		if (_players.GetPlayerFromPeerID(peerID) != null)
+		{
+			DisconnectPeer(peerID, MultipleDeviceMessage, DisconnectionCodeEnum.MultipleDeviceNotAllowed);
+			return;
+		}
+
+		if (_players.GetPlayer(username) is Player existing)
+		{
+			DisconnectPeer(existing.PeerID, OtherDeviceMessage, DisconnectionCodeEnum.MultipleDeviceNotAllowed);
+			OnPeerDisconnected(existing.PeerID);
+		}
 
 		// Create player based on auth data
 
@@ -817,11 +849,38 @@ public sealed partial class NetworkService : Instance
 		ReplicateSync.SyncPlaceToPlayer(plr);
 
 		// Connection timeout
-		await Globals.Singleton.WaitAsync(ConnectTimeoutSec);
-		if (!plr.IsDeleted && !plr.IsReady)
+		double start = World.LocalClock;
+		_loadProgress[peerID] = (0, start);
+		while (true)
 		{
-			DisconnectPeer(peerID, ConnectTimeoutMessage, DisconnectionCodeEnum.ConnectTimeout);
-			plr.ForceDelete();
+			await Globals.Singleton.WaitAsync(LoadProgressIntervalSec);
+			if (IsShuttingDown || IsDeleted || plr.IsDeleted || plr.IsReady || !_loadProgress.TryGetValue(peerID, out var progress)) break;
+			double now = World.LocalClock;
+			if (now - progress.Time > ConnectTimeoutSec || now - start > MaxConnectTimeSec)
+			{
+				DisconnectPeer(peerID, ConnectTimeoutMessage, DisconnectionCodeEnum.ConnectTimeout);
+				plr.ForceDelete();
+				break;
+			}
+		}
+		_loadProgress.Remove(peerID);
+	}
+
+	[NetRpc(AuthorityMode.Any, TransferMode = TransferMode.Reliable)]
+	private void NetLoadProgress(int count)
+	{
+		if (_loadProgress.TryGetValue(RemoteSenderId, out var progress) && count > progress.Count)
+		{
+			_loadProgress[RemoteSenderId] = (count, World.LocalClock);
+		}
+	}
+
+	private async void SendLoadProgress()
+	{
+		while (!_clientReady && ClientConnected && !IsShuttingDown && !IsDeleted)
+		{
+			RpcId(1, nameof(NetLoadProgress), Root.NetworkObjects.Count + (NetInstance?.ProcessedMessages ?? 0));
+			await Globals.Singleton.WaitAsync(LoadProgressIntervalSec);
 		}
 	}
 
@@ -831,6 +890,7 @@ public sealed partial class NetworkService : Instance
 		ClientConnected = true;
 		ClientConnectedToServer?.Invoke();
 		placeReplicationStartTime = Time.GetTicksMsec();
+		SendLoadProgress();
 	}
 
 	private void ConnectionFailed(NetworkInstance.NetInstanceErrorEnum netInstanceError)
@@ -870,11 +930,24 @@ public sealed partial class NetworkService : Instance
 
 	public async void ShutdownServer()
 	{
-		if (IsProd)
+		if (IsShuttingDown) return;
+		IsShuttingDown = true;
+
+		try
 		{
-			await PolyServerAPI.LogServerEvent(ServerEventType.ServerStopped);
+			if (IsProd)
+			{
+				await PolyServerAPI.LogServerEvent(ServerEventType.ServerStopped);
+			}
 		}
-		Globals.Singleton.Quit();
+		catch (Exception ex)
+		{
+			PT.PrintErr("Failed to report server shutdown: ", ex);
+		}
+		finally
+		{
+			Globals.Singleton.Quit();
+		}
 	}
 
 	private static void OnSessionStarted()
@@ -1005,6 +1078,7 @@ public sealed partial class NetworkService : Instance
 	[NetRpc(AuthorityMode.Server, TransferMode = TransferMode.Reliable)]
 	private void NetRecvReportReady()
 	{
+		_clientReady = true;
 		ClientReady?.Invoke();
 
 		// Dispatch run client scripts
@@ -1030,7 +1104,6 @@ public sealed partial class NetworkService : Instance
 	{
 		[JsonInclude] public string Name = null!;
 		[JsonInclude] public string ClassName = null!;
-		[JsonInclude] public string NodePath = null!;
 		[JsonInclude] public string ParentNodePath = null!;
 		[JsonInclude] public string ParentNodeID = null!;
 		[JsonInclude] public int Authority;
@@ -1039,6 +1112,7 @@ public sealed partial class NetworkService : Instance
 		[JsonInclude] public bool IsSyncOnce = false;
 		[JsonInclude] public int Index = 0;
 		[JsonInclude] public int Sequence = 0;
+		[JsonInclude] public byte[]? Transform;
 
 		public override readonly bool Equals(object? obj)
 		{
@@ -1064,7 +1138,7 @@ public sealed partial class NetworkService : Instance
 	[MemoryPackable]
 	public partial struct NetPropReplicateData()
 	{
-		[JsonInclude] public string Name = null!;
+		[JsonInclude] public ushort Index;
 		[JsonInclude] public byte[] ValueRaw = null!;
 		[JsonInclude] public long Sequence = 0;
 	}
@@ -1075,7 +1149,7 @@ public sealed partial class NetworkService : Instance
 		[JsonInclude] public string NetID = null!;
 		[MemoryPackIgnore]
 		[JsonIgnore]
-		public PropertyInfo? TargetProp;
+		public PropSyncProp? TargetProp;
 	}
 
 	[MemoryPackable]
@@ -1094,50 +1168,6 @@ public sealed partial class NetworkService : Instance
 		public string NetID = null!;
 		[JsonInclude]
 		public byte[] Bytecode = null!;
-	}
-
-	[JsonSerializable(typeof(string))]
-	[JsonSerializable(typeof(bool))]
-	[JsonSerializable(typeof(byte))]
-	[JsonSerializable(typeof(sbyte))]
-	[JsonSerializable(typeof(short))]
-	[JsonSerializable(typeof(ushort))]
-	[JsonSerializable(typeof(int))]
-	[JsonSerializable(typeof(uint))]
-	[JsonSerializable(typeof(long))]
-	[JsonSerializable(typeof(ulong))]
-	[JsonSerializable(typeof(float))]
-	[JsonSerializable(typeof(double))]
-	[JsonSerializable(typeof(decimal))]
-
-	[JsonSerializable(typeof(string[]))]
-	[JsonSerializable(typeof(byte[]))]
-
-	[JsonSerializable(typeof(Vector2))]
-	[JsonSerializable(typeof(Vector3))]
-	[JsonSerializable(typeof(Color))]
-
-	[JsonSerializable(typeof(Vector2Dto))]
-	[JsonSerializable(typeof(Vector3Dto))]
-	[JsonSerializable(typeof(ColorDto))]
-	[JsonSerializable(typeof(Transform3DDto))]
-	[JsonSerializable(typeof(UnitQuaternionDto))]
-	[JsonSerializable(typeof(UnitQuaternionUInt64Dto))]
-	[JsonSerializable(typeof(TransformPayloadDto))]
-
-	[JsonSerializable(typeof(NetPropNetworkedObjectRef))]
-	[JsonSerializable(typeof(NetPropReplicateData))]
-	[JsonSerializable(typeof(NetBatchScriptData))]
-	[JsonSerializable(typeof(NetBatchTransformData))]
-	[JsonSerializable(typeof(List<NetPropReplicateData>))]
-	[JsonSerializable(typeof(List<NetBatchTransformData>))]
-	[JsonSerializable(typeof(List<NetReplicateData>))]
-	[JsonSerializable(typeof(NetPropReplicateData[]))]
-	[JsonSerializable(typeof(NetBatchTransformData[]))]
-	[JsonSerializable(typeof(NetReplicateData[]))]
-	[JsonSerializable(typeof(NetBatchScriptData[]))]
-	internal partial class NetDataGenerationContext : JsonSerializerContext
-	{
 	}
 
 	public enum DisconnectionCodeEnum
@@ -1181,13 +1211,5 @@ public sealed partial class NetworkService : Instance
 	{
 		public SlidingWindowRateLimiter Reliable = new(MaxBroadcastPacketPerSec, TimeSpan.FromSeconds(1));
 		public SlidingWindowRateLimiter Unreliable = new(MaxBroadcastPacketPerSec, TimeSpan.FromSeconds(1));
-	}
-
-	private class RpcDispatchInfo
-	{
-		public required MethodInfo Method { get; init; }
-		public required NetRpcAttribute Attribute { get; init; }
-		public required Type[] ParameterTypes { get; init; }
-		public required Action<NetworkedObject, object?[]?> Invoke { get; init; }
 	}
 }

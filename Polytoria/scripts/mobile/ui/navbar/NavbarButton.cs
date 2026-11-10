@@ -8,33 +8,34 @@ namespace Polytoria.Mobile.UI;
 
 public partial class NavbarButton : Button
 {
-	private const float ActiveAlpha = 1f;
-	private const float InactiveAlpha = 0.4f;
-	private const double FadeSeconds = 0.16;
+	private const float InactiveAlpha = 0.5f;
 
 	[Export]
 	public MobileViewEnum SwitchTo;
 
-	private Tween? _activeTween;
+	[Export] private Control _icon = null!;
+
+	private Tween? _tween;
 
 	public override void _Ready()
 	{
-		MobileUI.Singleton.ViewPathSwitched += OnViewPathSwitched;
+		Modulate = new(1, 1, 1, InactiveAlpha);
 		base._Ready();
 	}
 
-	public override void _ExitTree()
+	public void SetActive(bool active)
 	{
-		if (MobileUI.Singleton != null) MobileUI.Singleton.ViewPathSwitched -= OnViewPathSwitched;
-		base._ExitTree();
-	}
+		_tween?.Kill();
+		_tween = CreateTween().SetParallel();
+		_tween.TweenProperty(this, "modulate:a", active ? 1f : InactiveAlpha, 0.2f);
 
-	private void OnViewPathSwitched(MobileViewEnum to)
-	{
-		float target = to == SwitchTo ? ActiveAlpha : InactiveAlpha;
-		_activeTween?.Kill();
-		_activeTween = CreateTween();
-		_activeTween.TweenProperty(this, "modulate:a", target, FadeSeconds);
+		if (active)
+		{
+			_icon.Scale = new(0.75f, 0.75f);
+			_tween.TweenProperty(_icon, "scale", Vector2.One, 0.4f)
+				.SetEase(Tween.EaseType.Out)
+				.SetTrans(Tween.TransitionType.Back);
+		}
 	}
 
 	public override void _Pressed()

@@ -19,6 +19,7 @@ public partial class UILabel : UIView
 	private string _text = "";
 	private Color _textColor;
 	private float _fontSize;
+	private int _appliedTextSize = -1;
 	private bool _autoSize;
 	private float _maxAutoSize;
 	private bool _useRichText;
@@ -39,6 +40,7 @@ public partial class UILabel : UIView
 		get => _text;
 		set
 		{
+			if (_text == value) return;
 			_text = value;
 			_richLabel.Text = _text;
 			_label.Text = _text;
@@ -157,9 +159,12 @@ public partial class UILabel : UIView
 		get => _autoSize;
 		set
 		{
+			bool changed = _autoSize != value;
+			if (changed && _autoSize) NodeControl.Resized -= UpdateText;
+
 			_autoSize = value;
-			if (_autoSize) NodeControl.Resized += UpdateText;
-			else NodeControl.Resized -= UpdateText;
+			if (changed && _autoSize) NodeControl.Resized += UpdateText;
+
 			UpdateText();
 			OnPropertyChanged();
 		}
@@ -283,6 +288,8 @@ public partial class UILabel : UIView
 	private void SetTextSize(float size)
 	{
 		int setto = (int)(size * FontScaleConversion);
+		if (setto == _appliedTextSize) return;
+		_appliedTextSize = setto;
 		_label.AddThemeFontSizeOverride("font_size", setto);
 		_richLabel.AddThemeFontSizeOverride("normal_font_size", setto);
 		_richLabel.AddThemeFontSizeOverride("bold_font_size", setto);
@@ -331,5 +338,16 @@ public partial class UILabel : UIView
 		OutlineColor = new(0, 0, 0);
 
 		base.Init();
+	}
+
+	public override void PreDelete()
+	{
+		if (_autoSize)
+		{
+			NodeControl.Resized -= UpdateText;
+			_autoSize = false;
+		}
+
+		base.PreDelete();
 	}
 }

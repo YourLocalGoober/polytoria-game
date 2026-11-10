@@ -5,7 +5,7 @@
 using Godot;
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Polytoria.Shared.AssetLoaders;
@@ -15,51 +15,38 @@ public partial class WebAssetLoader : Node
 	public WebAssetLoader()
 	{
 		Singleton = this;
-		Task.Run(Process);
 	}
 
 	public static WebAssetLoader Singleton { get; private set; } = null!;
 
-	private const int MAX_CONCURRENT_REQUESTS = 8;
+	private const int MAX_CONCURRENT_REQUESTS = 4;
 
 	private readonly PTHttpClient _client = new();
 
-	private readonly BlockingCollection<(WebCacheItem Item, Action<Resource> Callback)> _queue = [];
+	private readonly SemaphoreSlim _downloadSlots = new(MAX_CONCURRENT_REQUESTS);
 
 	private readonly ConcurrentDictionary<WebCacheItem, WebCacheItem> _cache = [];
 
-	private async Task Process()
+	private readonly ConcurrentDictionary<WebCacheItem, Lazy<Task<WebCacheItem>>> _pendingRequests = [];
+
+	private async Task<WebCacheItem> LoadItem(WebCacheItem item)
 	{
-		List<Task> workers = [];
-		for (int i = 0; i < MAX_CONCURRENT_REQUESTS; i++)
+		try
 		{
-			workers.Add(Task.Run(async () =>
+			await _downloadSlots.WaitAsync();
+			try
 			{
-				while (true)
-				{
-					(WebCacheItem item, Action<Resource> callback) = _queue.Take();
-
-					try
-					{
-						if (!_cache.TryGetValue(item, out WebCacheItem result))
-						{
-							result = await LoadResource(item);
-						}
-
-						Callable.From(() =>
-						{
-							callback(result.Resource);
-						}).CallDeferred();
-					}
-					catch (Exception exception)
-					{
-						PT.PrintErr("Failed to load resource (Type: " + item.Type + ", URL: " + item.URL + "): " + exception.Message);
-					}
-				}
-			}));
+				return await LoadResource(item);
+			}
+			finally
+			{
+				_downloadSlots.Release();
+			}
 		}
-
-		await Task.WhenAll(workers);
+		finally
+		{
+			_pendingRequests.TryRemove(item, out _);
+		}
 	}
 
 	private async Task<WebCacheItem> LoadResource(WebCacheItem item)
@@ -75,21 +62,7 @@ public partial class WebAssetLoader : Node
 		{
 			case WebResourceType.Image:
 				{
-					Image image = new();
-					if (item.URL.EndsWith(".png"))
-					{
-						image.LoadPngFromBuffer(buffer);
-					}
-					else if (item.URL.EndsWith(".jpg"))
-					{
-						image.LoadJpgFromBuffer(buffer);
-					}
-					else
-					{
-						image.LoadPngFromBuffer(buffer);
-					}
-
-					image.GenerateMipmaps();
+					Image image = await Globals.RunInBackground(() => DecodeImage(buffer, item.URL));
 					item.Resource = ImageTexture.CreateFromImage(image);
 
 					_cache.TryAdd(item, item);
@@ -100,9 +73,51 @@ public partial class WebAssetLoader : Node
 		}
 	}
 
-	public void GetResource(WebCacheItem item, Action<Resource> callback)
+	private static Image DecodeImage(byte[] buffer, string url)
 	{
-		_queue.Add((item, callback));
+		Image image = new();
+		Error error = url.EndsWith(".jpg") ? image.LoadJpgFromBuffer(buffer) : image.LoadPngFromBuffer(buffer);
+
+		if (error != Error.Ok)
+		{
+			throw new InvalidOperationException($"Couldn't decode image ({error})");
+		}
+
+		image.GenerateMipmaps();
+		return image;
+	}
+
+	public void GetResource(WebCacheItem item, Action<Resource> callback, Action? failed = null)
+	{
+		if (_cache.TryGetValue(item, out WebCacheItem cached))
+		{
+			Callable.From(() => callback(cached.Resource)).CallDeferred();
+			return;
+		}
+
+		Lazy<Task<WebCacheItem>> task = _pendingRequests.GetOrAdd(item, _ => new Lazy<Task<WebCacheItem>>(() => LoadItem(item), LazyThreadSafetyMode.ExecutionAndPublication));
+
+		_ = WaitForResource(task.Value, item, callback, failed);
+	}
+
+	private static async Task WaitForResource(Task<WebCacheItem> task, WebCacheItem item, Action<Resource> callback, Action? failed)
+	{
+		try
+		{
+			WebCacheItem result = await task;
+			Callable.From(() => callback(result.Resource)).CallDeferred();
+		}
+		catch (OperationCanceledException) when (Globals.IsExiting)
+		{
+		}
+		catch (Exception exception)
+		{
+			PT.PrintErr($"Failed to load resource (Type: {item.Type}, URL: {item.URL}): {exception.Message}");
+			if (failed != null)
+			{
+				Callable.From(failed).CallDeferred();
+			}
+		}
 	}
 }
 
@@ -124,7 +139,7 @@ public struct WebCacheItem
 
 	public override readonly int GetHashCode()
 	{
-		return URL.GetHashCode();
+		return HashCode.Combine(Type, URL);
 	}
 
 	public static bool operator ==(WebCacheItem left, WebCacheItem right)

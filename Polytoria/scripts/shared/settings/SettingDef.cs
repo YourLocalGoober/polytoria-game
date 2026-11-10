@@ -13,6 +13,7 @@ public interface ISettingOption
 	object? UntypedValue { get; }
 	string Label { get; }
 	string Description { get; }
+	bool IsDisabled { get; }
 }
 
 public class SettingOption<T> : ISettingOption
@@ -21,6 +22,9 @@ public class SettingOption<T> : ISettingOption
 	public required string Label { get; init; }
 	public string Description { get; init; } = string.Empty;
 	public object? UntypedValue => Value;
+
+	public Func<bool>? IsDisabledPredicate { get; init; }
+	public bool IsDisabled => IsDisabledPredicate?.Invoke() ?? false;
 }
 
 public interface ISettingCondition
@@ -52,6 +56,9 @@ public abstract class SettingDef
 	public IReadOnlyList<ISettingCondition>? Conditions { get; init; }
 	public Func<ISettingsContext, string?>? DisabledText { get; init; }
 	public bool AutoOffWhenDisabled { get; init; }
+
+	public Func<bool>? SupportedPredicate { get; init; }
+	public bool IsSupported => SupportedPredicate?.Invoke() ?? true;
 
 	public abstract object UntypedDefault { get; }
 	public abstract Type ValueType { get; }

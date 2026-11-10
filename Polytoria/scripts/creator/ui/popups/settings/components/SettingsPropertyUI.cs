@@ -45,6 +45,13 @@ public partial class SettingsPropertyUI : Control
 			sp.MaxValue = Convert.ToSingle(SettingDef.UntypedMaxValue);
 			sp.AllowGreater = false;
 			sp.AllowLesser = false;
+
+			float step = SettingDef.UntypedStep != null ? Convert.ToSingle(SettingDef.UntypedStep) : 0f;
+			if (step > 0f)
+			{
+				sp.Step = step;
+				sp.CustomArrowStep = step;
+			}
 		}
 
 		((Control)input).SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);

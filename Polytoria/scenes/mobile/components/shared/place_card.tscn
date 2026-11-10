@@ -2,98 +2,64 @@
 
 [ext_resource type="Texture2D" uid="uid://dagfk2fit4xsa" path="res://assets/textures/client/placeholder/place_icon.png" id="1_87myo"]
 [ext_resource type="Script" uid="uid://b3dmbhkwmv8d" path="res://scripts/mobile/ui/components/shared/PlaceCard.cs" id="1_uc8wn"]
-[ext_resource type="Texture2D" uid="uid://q41v5u10ix88" path="res://assets/textures/ui-icons/users.svg" id="1_wbc8c"]
-[ext_resource type="Texture2D" uid="uid://f8k4hb5wuttg" path="res://assets/textures/ui-icons/thumb-up.svg" id="2_15fv3"]
+[ext_resource type="Texture2D" uid="uid://ca1mu3488yl80" path="res://assets/textures/ui-icons/play-filled.svg" id="3_plyic"]
+[ext_resource type="Shader" uid="uid://cnbax5g7r03g" path="res://resources/shaders/ui/rounded_corners.gdshader" id="4_rndcr"]
 
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_normal"]
-content_margin_left = 10.0
-content_margin_top = 10.0
-content_margin_right = 10.0
-content_margin_bottom = 12.0
-bg_color = Color(0.0588, 0.0824, 0.1373, 1)
-corner_radius_top_left = 14
-corner_radius_top_right = 14
-corner_radius_bottom_right = 14
-corner_radius_bottom_left = 14
-shadow_color = Color(0, 0, 0, 0.35)
-shadow_size = 8
-shadow_offset = Vector2(0, 2)
-
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_pressed"]
-content_margin_left = 10.0
-content_margin_top = 10.0
-content_margin_right = 10.0
-content_margin_bottom = 12.0
-bg_color = Color(0.0353, 0.0549, 0.0941, 1)
-corner_radius_top_left = 14
-corner_radius_top_right = 14
-corner_radius_bottom_right = 14
-corner_radius_bottom_left = 14
-
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_hover"]
-content_margin_left = 10.0
-content_margin_top = 10.0
-content_margin_right = 10.0
-content_margin_bottom = 12.0
-bg_color = Color(0.0941, 0.1294, 0.2078, 1)
-border_width_left = 1
-border_width_top = 1
-border_width_right = 1
-border_width_bottom = 1
-border_color = Color(0.302, 0.624, 1, 0.55)
-corner_radius_top_left = 14
-corner_radius_top_right = 14
-corner_radius_bottom_right = 14
-corner_radius_bottom_left = 14
-shadow_color = Color(0.118, 0.337, 0.78, 0.35)
-shadow_size = 12
-shadow_offset = Vector2(0, 2)
-
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_icon"]
-bg_color = Color(0.0235, 0.0353, 0.0627, 1)
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_thmsk"]
+bg_color = Color(0.9254902, 0.9254902, 0.9254902, 1)
 corner_radius_top_left = 10
 corner_radius_top_right = 10
 corner_radius_bottom_right = 10
 corner_radius_bottom_left = 10
 
-[node name="PlaceCard" type="Button" unique_id=658224702 node_paths=PackedStringArray("_iconRect", "_gameTitleLabel", "_playingLabel", "_ratingLabel")]
-custom_minimum_size = Vector2(170, 252)
-offset_right = 170.0
-offset_bottom = 252.0
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_rndcr"]
+resource_local_to_scene = true
+shader = ExtResource("4_rndcr")
+shader_parameter/radius = 10.0
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_thmbr"]
+draw_center = false
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0, 0, 0, 0.08)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+corner_radius_bottom_right = 10
+corner_radius_bottom_left = 10
+
+[node name="PlaceCard" type="Button" unique_id=658224702 node_paths=PackedStringArray("_thumbnail", "_iconRect", "_gameTitleLabel", "_playingLabel")]
+custom_minimum_size = Vector2(114, 180)
+offset_right = 114.0
+offset_bottom = 180.0
+pivot_offset_ratio = Vector2(0.5, 0.5)
 mouse_filter = 1
-theme_override_styles/normal = SubResource("StyleBoxFlat_normal")
-theme_override_styles/pressed = SubResource("StyleBoxFlat_pressed")
-theme_override_styles/hover = SubResource("StyleBoxFlat_hover")
-theme_override_styles/focus = SubResource("StyleBoxFlat_hover")
+theme_type_variation = &"BareButton"
 script = ExtResource("1_uc8wn")
-_iconRect = NodePath("Layout/IconContainer/Icon")
-_gameTitleLabel = NodePath("Layout/Info/PlaceTitle")
-_playingLabel = NodePath("Layout/Info/Stats/Playing/PlayingLabel")
-_ratingLabel = NodePath("Layout/Info/Stats/Rating/RatingLabel")
+_thumbnail = NodePath("Layout/Thumbnail")
+_iconRect = NodePath("Layout/Thumbnail/Icon")
+_gameTitleLabel = NodePath("Layout/Title")
+_playingLabel = NodePath("Layout/Stats/Playing")
 
 [node name="Layout" type="VBoxContainer" parent="." unique_id=1973093464]
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = 10.0
-offset_top = 10.0
-offset_right = -10.0
-offset_bottom = -4.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
-theme_override_constants/separation = 10
+theme_override_constants/separation = 6
 
-[node name="IconContainer" type="Panel" parent="Layout" unique_id=1369013359]
-clip_children = 1
-custom_minimum_size = Vector2(0, 160)
+[node name="Thumbnail" type="Panel" parent="Layout" unique_id=965274964]
+custom_minimum_size = Vector2(114, 114)
 layout_mode = 2
-size_flags_vertical = 3
 mouse_filter = 2
-theme_override_styles/panel = SubResource("StyleBoxFlat_icon")
+theme_override_styles/panel = SubResource("StyleBoxFlat_thmsk")
 
-[node name="Icon" type="TextureRect" parent="Layout/IconContainer" unique_id=210773851]
+[node name="Icon" type="TextureRect" parent="Layout/Thumbnail" unique_id=1374811296]
+material = SubResource("ShaderMaterial_rndcr")
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
@@ -105,65 +71,43 @@ texture = ExtResource("1_87myo")
 expand_mode = 1
 stretch_mode = 6
 
-[node name="Info" type="VBoxContainer" parent="Layout" unique_id=1893859134]
-layout_mode = 2
+[node name="Border" type="Panel" parent="Layout/Thumbnail" unique_id=890841727]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
 mouse_filter = 2
-theme_override_constants/separation = 6
+theme_override_styles/panel = SubResource("StyleBoxFlat_thmbr")
 
-[node name="PlaceTitle" type="Label" parent="Layout/Info" unique_id=2025598818]
-custom_minimum_size = Vector2(0, 44)
+[node name="Title" type="Label" parent="Layout" unique_id=274594872]
+custom_minimum_size = Vector2(0, 40)
 layout_mode = 2
-size_flags_vertical = 3
-theme_override_colors/font_color = Color(0.961, 0.969, 0.984, 1)
-theme_override_font_sizes/font_size = 17
-text = "Prop Hunt"
+theme_type_variation = &"CardTitleLabel"
+text = "World Name"
 autowrap_mode = 3
-clip_text = true
 text_overrun_behavior = 3
+max_lines_visible = 2
 
-[node name="Stats" type="HBoxContainer" parent="Layout/Info" unique_id=1101027159]
-layout_mode = 2
-mouse_filter = 2
-theme_override_constants/separation = 14
-
-[node name="Playing" type="HBoxContainer" parent="Layout/Info/Stats" unique_id=522718687]
+[node name="Stats" type="HBoxContainer" parent="Layout" unique_id=639891314]
 layout_mode = 2
 mouse_filter = 2
 theme_override_constants/separation = 4
 
-[node name="TextureRect" type="TextureRect" parent="Layout/Info/Stats/Playing" unique_id=553315437]
-modulate = Color(0.659, 0.706, 0.788, 1)
-custom_minimum_size = Vector2(14, 14)
+[node name="PlayIcon" type="TextureRect" parent="Layout/Stats" unique_id=59408095]
+self_modulate = Color(0.5176471, 0.5176471, 0.5176471, 1)
+custom_minimum_size = Vector2(10, 0)
 layout_mode = 2
-size_flags_vertical = 4
 mouse_filter = 2
-texture = ExtResource("1_wbc8c")
+texture = ExtResource("3_plyic")
 expand_mode = 1
 stretch_mode = 5
 
-[node name="PlayingLabel" type="Label" parent="Layout/Info/Stats/Playing" unique_id=985451450]
+[node name="Playing" type="Label" parent="Layout/Stats" unique_id=534603923]
 layout_mode = 2
-theme_override_colors/font_color = Color(0.78, 0.82, 0.89, 1)
-theme_override_font_sizes/font_size = 14
-text = "3"
-
-[node name="Rating" type="HBoxContainer" parent="Layout/Info/Stats" unique_id=2008177505]
-layout_mode = 2
-mouse_filter = 2
-theme_override_constants/separation = 4
-
-[node name="TextureRect" type="TextureRect" parent="Layout/Info/Stats/Rating" unique_id=1211289069]
-modulate = Color(0.659, 0.706, 0.788, 1)
-custom_minimum_size = Vector2(14, 14)
-layout_mode = 2
-size_flags_vertical = 4
-mouse_filter = 2
-texture = ExtResource("2_15fv3")
-expand_mode = 1
-stretch_mode = 5
-
-[node name="RatingLabel" type="Label" parent="Layout/Info/Stats/Rating" unique_id=760625489]
-layout_mode = 2
-theme_override_colors/font_color = Color(0.78, 0.82, 0.89, 1)
-theme_override_font_sizes/font_size = 14
-text = "84%"
+size_flags_horizontal = 3
+theme_type_variation = &"SubtleLabel"
+theme_override_font_sizes/font_size = 12
+text = "0 active now"
+text_overrun_behavior = 3

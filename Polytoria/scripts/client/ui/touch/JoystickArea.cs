@@ -3,14 +3,19 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 using Godot;
+using System.Collections.Generic;
 
 namespace Polytoria.Client.UI.Touch;
 
 public partial class JoystickArea : InputFallbackBase
 {
+	private const string MoveAction = "forward";
+
 	[Export] public float MaxThumbstickDistance = 150f;
-	[Export] public float Deadzone = 10f;
-	[Export(PropertyHint.Range, "0,1,0.01")] public float SprintThreshold = 0.9f;
+	[Export] public float Deadzone = 8f;
+	[Export(PropertyHint.Range, "0.1,1,0.01")] public float FullWalkAt = 0.55f;
+	[Export] public float SprintStartDistance = 1.6f;
+	[Export] public float SprintStopDistance = 1.35f;
 
 	private bool _dragging = false;
 	private bool _sprinting = false;
@@ -21,9 +26,53 @@ public partial class JoystickArea : InputFallbackBase
 
 	private int? _activeTouchIndex = null;
 
+	private static readonly List<JoystickArea> _areas = [];
+
+	public static int HeldIndex { get; private set; } = -1;
+
+	public static bool Covers(Viewport viewport, Vector2 position)
+	{
+		foreach (JoystickArea area in _areas)
+		{
+			if (area.GetViewport() == viewport && area.IsVisibleInTree() && area.GetGlobalRect().HasPoint(position)) return true;
+		}
+		return false;
+	}
+
 	public override void _Ready()
 	{
 		_line = GetNode<Line2D>("Line");
+	}
+
+	public override void _EnterTree()
+	{
+		_areas.Add(this);
+		GetTree().Root.WindowInput += OnRootInput;
+	}
+
+	public override void _ExitTree()
+	{
+		_areas.Remove(this);
+		GetTree().Root.WindowInput -= OnRootInput;
+		if (_activeTouchIndex != null) Release();
+	}
+
+	private void OnRootInput(InputEvent @event)
+	{
+		if (@event is InputEventScreenTouch touch && !touch.Pressed && touch.Index == _activeTouchIndex)
+		{
+			Release();
+		}
+	}
+
+	private void Release()
+	{
+		if (HeldIndex == _activeTouchIndex) HeldIndex = -1;
+		_activeTouchIndex = null;
+		_dragging = false;
+		_line.Visible = false;
+		SetSprint(false);
+		SendInputEnd();
 	}
 
 	public override void _Process(double delta)
@@ -36,11 +85,14 @@ public partial class JoystickArea : InputFallbackBase
 			return;
 		}
 
-		Vector2 axis = GetThumbstickAxis();
+		Vector2 thumb = (_endPos - _startPos).LimitLength(MaxThumbstickDistance);
+		float travel = GetTravel(thumb);
 
 		_line.ClearPoints();
 		_line.AddPoint(_startPos);
-		_line.AddPoint(_startPos + axis * MaxThumbstickDistance);
+		_line.AddPoint(_startPos + thumb);
+
+		Vector2 axis = ToStickAxis(thumb.Normalized(), Mathf.Min(travel / FullWalkAt, 1f));
 
 		InputEventJoypadMotion leftX = new()
 		{
@@ -59,21 +111,40 @@ public partial class JoystickArea : InputFallbackBase
 		Input.ParseInputEvent(leftX);
 		Input.ParseInputEvent(leftY);
 
-		bool shouldSprint = axis.Length() >= SprintThreshold;
-		SetSprint(shouldSprint);
+		float pushed = (_endPos - _startPos).Length() / MaxThumbstickDistance;
+		SetSprint(_sprinting ? pushed >= SprintStopDistance : pushed >= SprintStartDistance);
 	}
 
-	private Vector2 GetThumbstickAxis()
+	private float GetTravel(Vector2 thumb)
 	{
-		Vector2 delta = _endPos - _startPos;
+		float length = thumb.Length();
+		if (length < Deadzone)
+		{
+			return 0f;
+		}
 
-		if (delta.Length() < Deadzone)
+		return (length - Deadzone) / (MaxThumbstickDistance - Deadzone);
+	}
+
+	private static Vector2 ToStickAxis(Vector2 direction, float speed)
+	{
+		if (speed <= 0f)
 		{
 			return Vector2.Zero;
 		}
 
-		Vector2 clamped = delta.LimitLength(MaxThumbstickDistance);
-		return clamped / MaxThumbstickDistance;
+		float deadzone = InputMap.ActionGetDeadzone(MoveAction);
+		return new(CompensateDeadzone(direction.X * speed, deadzone), CompensateDeadzone(direction.Y * speed, deadzone));
+	}
+
+	private static float CompensateDeadzone(float value, float deadzone)
+	{
+		if (Mathf.IsZeroApprox(value))
+		{
+			return 0f;
+		}
+
+		return Mathf.Sign(value) * (deadzone + (1f - deadzone) * Mathf.Abs(value));
 	}
 
 	private static void SendInputEnd()
@@ -101,6 +172,7 @@ public partial class JoystickArea : InputFallbackBase
 			if (touch.Pressed && _activeTouchIndex == null)
 			{
 				_activeTouchIndex = touch.Index;
+				HeldIndex = touch.Index;
 				_startPos = touch.Position;
 				_endPos = _startPos;
 				_dragging = true;
@@ -109,11 +181,7 @@ public partial class JoystickArea : InputFallbackBase
 			}
 			else if (!touch.Pressed && _activeTouchIndex == touch.Index)
 			{
-				_activeTouchIndex = null;
-				_dragging = false;
-				_line.Visible = false;
-				SetSprint(false);
-				SendInputEnd();
+				Release();
 				AcceptEvent();
 			}
 		}

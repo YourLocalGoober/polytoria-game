@@ -15,6 +15,14 @@ public partial class PTImageAsset : ImageAsset
 	private ImageTypeEnum _imageType;
 	private string _directURL = "";
 
+	[ScriptMethod]
+	public static PTImageAsset FromID([ScriptingCaller] Script caller, uint id)
+	{
+		PTImageAsset asset = (PTImageAsset)NetworkedObject.NewFromScript(caller, "PTImageAsset")!;
+		asset.ImageID = id;
+		return asset;
+	}
+
 	[Editable, ScriptProperty]
 	public uint ImageID
 	{
@@ -51,11 +59,6 @@ public partial class PTImageAsset : ImageAsset
 	}
 
 	internal string? DirectImageURL { get; private set; }
-
-	public static void RegisterAsset()
-	{
-		RegisterType<PTImageAsset>();
-	}
 
 	public override void LoadResource()
 	{

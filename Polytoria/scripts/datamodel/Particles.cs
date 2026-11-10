@@ -22,7 +22,7 @@ public sealed partial class Particles : Dynamic
 	private GpuParticles3D _particles = null!;
 	private ParticleProcessMaterial _particle = null!;
 
-	private double _aabbUpdateTimer = 0;
+	private double _aabbUpdateTimer = Random.Shared.NextDouble() * AabbUpdateIntervalSec;
 
 	private ImageAsset? _asset;
 	private TextureFilterEnum _textureFilter;
@@ -76,7 +76,7 @@ public sealed partial class Particles : Dynamic
 	private BlendModeEnum _blendMode;
 	private bool _shaded = true;
 
-	private Godot.Mesh _mesh = null!;
+	private static QuadMesh? _quadMesh;
 	private StandardMaterial3D _material = null!;
 
 	private bool _paused;
@@ -340,7 +340,7 @@ public sealed partial class Particles : Dynamic
 	public NumberSeries RadialAccelerationOverLifetime
 	{
 		get => _radialAccelerationOverLifetime;
-		private set
+		internal set
 		{
 			_radialAccelerationOverLifetime = value;
 			_particle.RadialAccelCurve = value.ToCurveTexture();
@@ -367,7 +367,7 @@ public sealed partial class Particles : Dynamic
 	public NumberSeries TangentialAccelerationOverLifetime
 	{
 		get => _tangentialAccelerationOverLifetime;
-		private set
+		internal set
 		{
 			_tangentialAccelerationOverLifetime = value;
 			_particle.TangentialAccelCurve = value.ToCurveTexture();
@@ -394,7 +394,7 @@ public sealed partial class Particles : Dynamic
 	public NumberSeries OrbitalVelocityOverLifetime
 	{
 		get => _orbitalVelocityOverLifetime;
-		private set
+		internal set
 		{
 			_orbitalVelocityOverLifetime = value;
 			_particle.OrbitVelocityCurve = value.ToCurveTexture();
@@ -421,7 +421,7 @@ public sealed partial class Particles : Dynamic
 	public NumberSeries DampingOverLifetime
 	{
 		get => _dampingOverLifetime;
-		private set
+		internal set
 		{
 			_dampingOverLifetime = value;
 			_particle.DampingCurve = value.ToCurveTexture();
@@ -448,7 +448,7 @@ public sealed partial class Particles : Dynamic
 	public NumberSeries ScaleOverVelocityCurve
 	{
 		get => _scaleOverVelocityCurve;
-		private set
+		internal set
 		{
 			_scaleOverVelocityCurve = value;
 
@@ -495,7 +495,7 @@ public sealed partial class Particles : Dynamic
 	public NumberSeries TurbulenceOverLifetime
 	{
 		get => _turbulenceOverLifetime;
-		private set
+		internal set
 		{
 			_turbulenceOverLifetime = value;
 			_particle.TurbulenceInfluenceOverLife = value.ToCurveTexture();
@@ -736,12 +736,12 @@ public sealed partial class Particles : Dynamic
 		_particle = new();
 		GDNode3D.AddChild(_particles = new() { ProcessMaterial = _particle }, false, Node.InternalMode.Front);
 		_material = new() { VertexColorUseAsAlbedo = true, VertexColorIsSrgb = true, Transparency = BaseMaterial3D.TransparencyEnum.Alpha };
-		_mesh = new QuadMesh() { Material = _material };
 
 		_material.BillboardKeepScale = true;
 		_material.Transparency = BaseMaterial3D.TransparencyEnum.Alpha;
 
-		_particles.DrawPass1 = _mesh;
+		_particles.MaterialOverride = _material;
+		_particles.DrawPass1 = _quadMesh ??= new();
 
 		// Workaround for triggering particles to play even if they're not visible
 		_particles.VisibilityAabb = new Aabb().Grow(1000000);
@@ -791,6 +791,8 @@ public sealed partial class Particles : Dynamic
 
 	private void UpdateVisibilityAabb()
 	{
+		if (RenderingServer.GetCurrentRenderingMethod() == "gl_compatibility") return;
+		if (IsHidden || !_particles.Emitting || !_particles.IsVisibleInTree()) return;
 		Aabb captured = _particles.CaptureAabb();
 		if (captured.Size != Vector3.Zero)
 			// Double the size

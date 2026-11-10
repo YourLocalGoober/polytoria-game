@@ -16,12 +16,10 @@ namespace Polytoria.Providers.AssetLoaders;
 
 public class PTAssetProvider : IAssetProvider
 {
-	// hardcode the Polytoria API and load assets from the client, as its (maybe?) faster, and less resources on the server
-	private const string RootUrl = "https://api.polytoria.com/v1/assets/";
+	private const string RootUrl = Globals.ApiEndpoint + "v1/assets/";
 	private const string ServeURL = RootUrl + "serve/";
 	private const string ServeMeshURL = RootUrl + "serve-mesh/";
 	private const string ServeAudioURL = RootUrl + "serve-audio/";
-	private const string SelfHostedServeURL = Globals.ApiEndpoint + "v1/assets/serve/";
 	private readonly PTHttpClient _client = new();
 
 	public async Task<CacheItem> LoadResource(CacheItem item)
@@ -46,41 +44,17 @@ public class PTAssetProvider : IAssetProvider
 		item.SizeBytes = buffer.LongLength;
 		item.DirectURL = imageUrl;
 
+		CacheItem result;
 		switch (item.Type)
 		{
 			case ResourceType.Mesh:
-				{
-					GltfDocument document = new();
-					GltfState state = new() { CreateAnimations = true };
-
-					document.AppendFromBuffer(buffer, null, state);
-
-					Node3D scene = (Node3D)document.GenerateScene(state);
-
-					RemoveNonMeshNodes(scene);
-
-					SetMipmapTextureFilter(scene);
-
-					TaskCompletionSource<PackedScene> callback = new();
-
-					Callable.From(() =>
-					{
-						PackedScene mesh = new();
-						mesh.Pack(scene);
-						scene.Free();
-
-						callback.SetResult(mesh);
-					}).CallDeferred();
-
-					item.Resource = await callback.Task;
-
-					return item;
-				}
+				result = await LoadMesh(item, buffer);
+				break;
 			case ResourceType.Audio:
 				{
 					item.Resource = new AudioStreamMP3() { Data = buffer };
-
-					return item;
+					result = item;
+					break;
 				}
 			case ResourceType.Asset:
 			case ResourceType.Decal:
@@ -92,28 +66,15 @@ public class PTAssetProvider : IAssetProvider
 			case ResourceType.GuildThumbnail:
 			case ResourceType.GuildBanner:
 				{
-					Image image = new();
-					image.LoadPngFromBuffer(buffer);
-
-					bool isThumbnail = item.Type != ResourceType.Asset && item.Type != ResourceType.Decal;
-					if (!isThumbnail)
-					{
-						image.GenerateMipmaps();
-						image.FixAlphaEdges();
-					}
-
-					if (item.Resize != null)
-					{
-						Image.Interpolation interp = isThumbnail ? Image.Interpolation.Bilinear : Image.Interpolation.Lanczos;
-						image.Resize(item.Resize.Value.X, item.Resize.Value.Y, interp);
-					}
-
+					Image image = await Globals.RunInBackground(() => DecodeImage(buffer, item.Resize));
 					item.Resource = ImageTexture.CreateFromImage(image);
-
-					return item;
+					result = item;
+					break;
 				}
 			default: throw new NotImplementedException();
 		}
+
+		return result;
 	}
 
 	public string GetAssetServeURL(uint id, ResourceType itemType)
@@ -126,7 +87,7 @@ public class PTAssetProvider : IAssetProvider
 			ResourceType.Audio => ServeAudioURL + id,
 			ResourceType.AssetThumbnail => ServeURL + id + "/assetThumbnail",
 			ResourceType.PlaceThumbnail => ServeURL + id + "/placeThumbnail",
-			ResourceType.PlaceIcon => SelfHostedServeURL + id + "/placeIcon",
+			ResourceType.PlaceIcon => ServeURL + id + "/placeIcon",
 			ResourceType.UserThumbnail => ServeURL + id + "/userAvatar",
 			ResourceType.UserHeadshot => ServeURL + id + "/userAvatarHeadshot",
 			ResourceType.GuildThumbnail => ServeURL + id + "/guildIcon",
@@ -137,9 +98,72 @@ public class PTAssetProvider : IAssetProvider
 		return url;
 	}
 
-	public void Dispose()
+	public void Dispose() { }
+
+	private static async Task<CacheItem> LoadMesh(CacheItem item, byte[] buffer)
 	{
-		GC.SuppressFinalize(this);
+		Node3D scene = await Globals.RunInBackground(() =>
+		{
+			using GltfDocument document = new();
+			using GltfState state = new() { CreateAnimations = true };
+
+			document.AppendFromBuffer(buffer, null, state);
+
+			return (Node3D)document.GenerateScene(state);
+		});
+
+		// Remove arbitrary nodes that may come with the GLTF (eg. Rigidbodies)
+		RemoveNonMeshNodes(scene);
+
+		// Set mipmap texture filter for meshes
+		SetMipmapTextureFilter(scene);
+		FixNegScaleMeshes(scene);
+
+		TaskCompletionSource<PackedScene> callback = new();
+
+		Callable.From(() =>
+		{
+			try
+			{
+				PackedScene mesh = new();
+				mesh.Pack(scene);
+				callback.SetResult(mesh);
+			}
+			catch (Exception ex)
+			{
+				callback.SetException(ex);
+			}
+			finally
+			{
+				scene.Free();
+			}
+		}).CallDeferred();
+
+		item.Resource = await callback.Task;
+
+		return item;
+	}
+
+	private static Image DecodeImage(byte[] buffer, Vector2I? resize)
+	{
+		Image image = new();
+		image.LoadPngFromBuffer(buffer);
+
+		if (resize != null)
+		{
+			image.Resize(resize.Value.X, resize.Value.Y, Image.Interpolation.Lanczos);
+		}
+
+		FixAlphaEdgesIfNeeded(image);
+		image.GenerateMipmaps();
+
+		return image;
+	}
+
+	private static void FixAlphaEdgesIfNeeded(Image image)
+	{
+		if (image.DetectAlpha() == Image.AlphaMode.None) return;
+		image.FixAlphaEdges();
 	}
 
 	private static void RemoveNonMeshNodes(Node node)
@@ -148,13 +172,8 @@ public class PTAssetProvider : IAssetProvider
 		{
 			RemoveNonMeshNodes(child); // recurse first
 
-			bool isMesh = child is MeshInstance3D;
-			bool isSkeleton = child is Skeleton3D;
-			bool isExactNode3D = child.GetType() == typeof(Node3D);
-			bool isAnimationPlayer = child is AnimationPlayer;
-			bool isAnimationTree = child is AnimationTree;
-
-			if (!isMesh && !isSkeleton && !isExactNode3D && !isAnimationPlayer && !isAnimationTree)
+			if (child is not (MeshInstance3D or Skeleton3D or AnimationPlayer or AnimationTree or BoneAttachment3D) &&
+				child.GetType() != typeof(Node3D))
 			{
 				child.Free();
 			}
@@ -173,9 +192,51 @@ public class PTAssetProvider : IAssetProvider
 				{
 					if (meshInstance.GetActiveMaterial(s) is BaseMaterial3D material)
 					{
+						if (material.AlbedoTexture is ImageTexture albedoTex)
+						{
+							Image img = albedoTex.GetImage();
+							FixAlphaEdgesIfNeeded(img);
+							img.GenerateMipmaps();
+							material.AlbedoTexture = ImageTexture.CreateFromImage(img);
+						}
+
 						material.TextureFilter = BaseMaterial3D.TextureFilterEnum.LinearWithMipmaps;
 					}
 				}
+			}
+		}
+	}
+
+	private static void FixNegScaleMeshes(Node node)
+	{
+		foreach (Node child in node.GetChildren())
+		{
+			FixNegScaleMeshes(child);
+
+			if (child is MeshInstance3D meshInstance && meshInstance.Mesh is ArrayMesh original && meshInstance.Basis.Determinant() < 0 && original.GetBlendShapeCount() == 0)
+			{
+				ArrayMesh mesh = new();
+
+				for (int s = 0; s < original.GetSurfaceCount(); s++)
+				{
+					Godot.Collections.Array arrays = original.SurfaceGetArrays(s);
+					Material material = original.SurfaceGetMaterial(s);
+
+					if (material is BaseMaterial3D baseMaterial && baseMaterial.CullMode == BaseMaterial3D.CullModeEnum.Disabled)
+					{
+						Vector3[] normals = arrays[(int)Mesh.ArrayType.Normal].AsVector3Array();
+						for (int i = 0; i < normals.Length; i++)
+						{
+							normals[i] = -normals[i];
+						}
+						arrays[(int)Mesh.ArrayType.Normal] = normals;
+					}
+
+					mesh.AddSurfaceFromArrays(original.SurfaceGetPrimitiveType(s), arrays);
+					mesh.SurfaceSetMaterial(s, material);
+				}
+
+				meshInstance.Mesh = mesh;
 			}
 		}
 	}

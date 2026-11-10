@@ -38,11 +38,11 @@ public partial class UITextInput : UIView
 		{
 			if (_lineEdit.Visible)
 			{
-				return _lineEdit.Text;
+				return Services.FilterService.Filter(_lineEdit.Text);
 			}
 			else if (_textEdit.Visible)
 			{
-				return _textEdit.Text;
+				return Services.FilterService.Filter(_textEdit.Text);
 			}
 			return "";
 		}
@@ -110,9 +110,12 @@ public partial class UITextInput : UIView
 		get => _autoSize;
 		set
 		{
+			bool changed = _autoSize != value;
+			if (changed && _autoSize) NodeControl.Resized -= UpdateTextSize;
+
 			_autoSize = value;
-			if (_autoSize) NodeControl.Resized += UpdateTextSize;
-			else NodeControl.Resized -= UpdateTextSize;
+			if (changed && _autoSize) NodeControl.Resized += UpdateTextSize;
+
 			UpdateTextSize();
 			OnPropertyChanged();
 		}
@@ -323,6 +326,12 @@ public partial class UITextInput : UIView
 
 	public override void PreDelete()
 	{
+		if (_autoSize)
+		{
+			NodeControl.Resized -= UpdateTextSize;
+			_autoSize = false;
+		}
+
 		_textEdit.FocusEntered -= OnTextEditFocusEntered;
 		_textEdit.FocusExited -= OnTextEditFocusExited;
 		_lineEdit.FocusEntered -= OnLineEditFocusEntered;
@@ -341,6 +350,14 @@ public partial class UITextInput : UIView
 		if (_textEdit.Visible) { _textEdit.GrabFocus(); }
 		if (_lineEdit.Visible) { _lineEdit.GrabFocus(); }
 	}
+
+	[ScriptMethod]
+	public void Unfocus()
+	{
+		_textEdit.ReleaseFocus();
+		_lineEdit.ReleaseFocus();
+	}
+
 
 	private void OnTextEditFocusEntered()
 	{
@@ -364,18 +381,18 @@ public partial class UITextInput : UIView
 
 	private void OnTextEditTextChanged()
 	{
-		Changed.Invoke(_textEdit.Text);
+		Changed.Invoke(Services.FilterService.Filter(_textEdit.Text));
 		UpdateTextSize();
 	}
 
 	private void OnLineEditTextChanged(string txt)
 	{
-		Changed.Invoke(txt);
+		Changed.Invoke(Services.FilterService.Filter(txt));
 		UpdateTextSize();
 	}
 
 	private void OnLineEditTextSubmitted(string str)
 	{
-		Submitted.Invoke(str);
+		Submitted.Invoke(Services.FilterService.Filter(str));
 	}
 }

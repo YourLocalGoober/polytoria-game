@@ -9,6 +9,12 @@ using Polytoria.Datamodel.Services;
 using Polytoria.Scripting;
 using System;
 using System.Collections.Generic;
+#if CREATOR
+using Polytoria.Creator.UI;
+#endif
+using System.Threading;
+using System.Threading.Tasks;
+using Polytoria.Scripting.Luau;
 
 namespace Polytoria.Datamodel;
 
@@ -19,6 +25,10 @@ public partial class Script : Instance
 
 	internal Scripting.Luau.LuaState? LuauState;
 	internal Scripting.Luau.LuaState? LuauMainThread;
+	internal int? LuauStateRef;
+	internal int? LuauMainThreadRef;
+	internal bool LuauActive;
+	internal CancellationTokenSource? LuauCancellation;
 
 	[CloneInclude]
 	public byte[]? Bytecode { get; internal set; }
@@ -26,11 +36,19 @@ public partial class Script : Instance
 	internal readonly Dictionary<object, int> LuauUserdataCache = [];
 	internal readonly HashSet<Scripting.Luau.LuaObject> LuauObjectCache = [];
 	internal readonly HashSet<IntPtr> LuauFunctionPointers = [];
+	internal readonly HashSet<int> LuauFunctionReferences = [];
+	internal readonly HashSet<int> LuauThreadReferences = [];
+	internal readonly Stack<(Scripting.Luau.LuaState Thread, int Ref)> LuauIdleThreads = [];
+	internal readonly HashSet<IntPtr> LuauRentedThreads = [];
+	internal Task? LuauUpdateTask;
+	internal Task? LuauFixedUpdateTask;
 
 	private string? _source;
 	private FileLinkAsset? _linkedFile;
 	private bool _compatibility = false;
 	private bool _isEnabled = true;
+
+	private bool _isErrorSignaled = false;
 
 	[Editable(IsHidden = true), NoSync, CloneInclude, SaveIgnore]
 	public string Source
@@ -72,6 +90,9 @@ public partial class Script : Instance
 			{
 				Stop();
 			}
+#if CREATOR
+			Explorer.RefreshTreeItem(this);
+#endif
 		}
 	}
 
@@ -103,12 +124,16 @@ public partial class Script : Instance
 	/// <summary>
 	/// Determine if this script should execute
 	/// </summary>
-	internal bool ShouldContinue => (this is ModuleScript || Ran) && IsEnabled && !IsDeleted;
+	internal bool ShouldContinue => LuauActive && (this is ModuleScript || Ran) && IsEnabled && !IsDeleted;
 
 	public IScriptLanguageProvider LanguageProvider = null!;
 
 	public ScriptLanguagesEnum ChosenLanguage = ScriptLanguagesEnum.Luau;
 	public ScriptPermissionFlags PermissionFlags = 0;
+
+	[ScriptProperty]
+	public PTSignal Errored { get; private set; } = new();
+
 
 	public void TryRun()
 	{
@@ -132,13 +157,14 @@ public partial class Script : Instance
 
 	public void Stop()
 	{
-		if (!Ran) return;
+		if (!Ran && LuauState == null) return;
 		ScriptService.Close(this);
 	}
 
 	public override void PreDelete()
 	{
-		Stop();
+		if (Ran || LuauState != null)
+			ScriptService.Close(this);
 		base.PreDelete();
 	}
 
@@ -230,5 +256,14 @@ public partial class Script : Instance
 	{
 		if (Bytecode != null) return;
 		Root.ScriptService.CompileScript(this);
+	}
+
+	public void SignalError(string message, LuaState thread)
+	{
+		if (_isErrorSignaled) return;
+
+		_isErrorSignaled = true;
+		Errored.Invoke(message, thread);
+		_isErrorSignaled = false;
 	}
 }

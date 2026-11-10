@@ -27,6 +27,7 @@ public partial class Grabbable : Instance
 	private float _maxGrabbableRange;
 	private bool _useDragForce;
 	private Player? _dragger;
+	private bool _parentOwnershipAuto = true;
 	private GrabbablePermissionModeEnum _permissionMode = GrabbablePermissionModeEnum.Everyone;
 
 	[Editable, ScriptProperty, DefaultValue(10)]
@@ -195,6 +196,7 @@ public partial class Grabbable : Instance
 
 	public override void ExitTree()
 	{
+		_dragger?.ReleaseGrabbing();
 		_parent?.Clicked.Disconnect(OnClicked);
 		_parent?.MouseEnter.Disconnect(OnMouseEnter);
 		_parent?.MouseExit.Disconnect(OnMouseExit);
@@ -211,6 +213,10 @@ public partial class Grabbable : Instance
 
 	public override void PreDelete()
 	{
+		if (_dragging && _dragger == Root.Players.LocalPlayer)
+		{
+			Root.PlayerGUI.SetCursorShape(Control.CursorShape.Arrow);
+		}
 		Root.Input.GodotInputEvent -= OnInput;
 		base.PreDelete();
 	}
@@ -283,8 +289,10 @@ public partial class Grabbable : Instance
 
 	private void GiveDragTo(Player plr)
 	{
-		if (_parent == null) return;
+		if (_parent == null || _dragger != null) return;
 		_dragger = plr;
+		_dragger.SetGrabbing(_parent);
+		_parentOwnershipAuto = _parent.NetworkOwnershipAuto;
 		_parent.SetNetworkAuthority(plr);
 		Grabbed.Invoke(plr);
 		RpcId(plr.PeerID, nameof(NetGrabDrag));
@@ -316,6 +324,10 @@ public partial class Grabbable : Instance
 	internal void InternalGiveGrab()
 	{
 		_dragger = Root.Players.LocalPlayer;
+		if (_parent != null)
+		{
+			_dragger.SetGrabbing(_parent);
+		}
 		_dragging = true;
 		Grabbed.Invoke(_dragger);
 		Root.PlayerGUI.SetCursorShape(Control.CursorShape.CanDrop);
@@ -331,7 +343,11 @@ public partial class Grabbable : Instance
 			InternalReleaseDrag();
 
 			// Return authority to server
-			_parent?.SetNetworkAuthority(null);
+			if (_parent != null)
+			{
+				_parent.SetNetworkAuthority(null);
+				_parent.NetworkOwnershipAuto = _parentOwnershipAuto;
+			}
 
 			if (UseDragForce && _parent?.GDNode is RigidBody3D rigid3D)
 			{
@@ -352,6 +368,7 @@ public partial class Grabbable : Instance
 	private void InternalReleaseDrag()
 	{
 		_dragging = false;
+		_dragger?.ReleaseGrabbing();
 		_dragger = null;
 		Released.Invoke();
 	}
@@ -362,7 +379,15 @@ public partial class Grabbable : Instance
 		if (_dragger == null) return;
 
 		// Set to null when deleted
-		if (_dragger.IsDeleted) { _dragger = null; return; }
+		if (_dragger.IsDeleted)
+		{
+			_dragger = null;
+			if (Root.Network.IsServer && _parent != null)
+			{
+				_parent.NetworkOwnershipAuto = _parentOwnershipAuto;
+			}
+			return;
+		}
 
 		// Process drag physics if enabled
 		if (UseDragForce)
@@ -397,7 +422,7 @@ public partial class Grabbable : Instance
 					}
 					else
 					{
-						RayResult? hit = Root.Environment.Raycast(rayOrigin, rayDir, ignoreList: [Parent]);
+						RayResult? hit = Root.Environment.Raycast(rayOrigin, rayDir, ignoreList: [Parent], passthroughMask: 1 << 2);
 						if (hit != null)
 						{
 							targetPos = hit.Value.Position;

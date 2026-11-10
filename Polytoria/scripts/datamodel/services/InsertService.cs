@@ -9,7 +9,7 @@ using Polytoria.Schemas.API;
 using Polytoria.Scripting;
 using Polytoria.Shared;
 using Polytoria.Utils;
-using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Threading.Tasks;
 #if CREATOR
@@ -22,7 +22,7 @@ namespace Polytoria.Datamodel.Services;
 public sealed partial class InsertService : Instance
 {
 	private readonly PTHttpClient _httpClient = new();
-	private static readonly Dictionary<int, APIStoreItem> _storeItemCache = [];
+	private static readonly ConcurrentDictionary<int, APIStoreItem> _storeItemCache = [];
 
 	[ScriptMethod, Attributes.Obsolete("Use ModelAsync instead")]
 	public void Model(int id, PTCallback? callback = null)
@@ -124,10 +124,30 @@ public sealed partial class InsertService : Instance
 #endif
 
 	[ScriptMethod]
-	public async Task<Accessory?> AccessoryAsync(int id, string? directMeshUrl = null)
+	public async Task<Clothing?> ClothingAsync(int id)
 	{
 		APIStoreItem storeItem = await GetStoreItemCachedAsync(id);
 
+		PTImageAsset imageAsset = New<PTImageAsset>();
+		imageAsset.ImageID = (uint)id;
+		imageAsset.ImageType = ImageTypeEnum.Asset;
+
+		Clothing clothing = New<Clothing>();
+		clothing.Name = storeItem.Name;
+		clothing.Image = imageAsset;
+
+		return clothing;
+	}
+
+	[ScriptMethod]
+	public async Task<Accessory?> AccessoryAsync(int id, string? directMeshUrl = null)
+	{
+		APIStoreItem storeItem = await GetStoreItemCachedAsync(id);
+		return CreateAccessory(id, storeItem.Name, storeItem.AccessoryType, directMeshUrl);
+	}
+
+	internal Accessory CreateAccessory(int id, string name, string? accessoryType, string? directMeshUrl = null)
+	{
 		PTMeshAsset meshAsset = New<PTMeshAsset>();
 		meshAsset.DirectURL = directMeshUrl ?? "";
 		meshAsset.AssetID = (uint)id;
@@ -146,11 +166,9 @@ public sealed partial class InsertService : Instance
 		mesh.Name = "Mesh";
 		mesh.CanCollide = false;
 		mesh.Anchored = true;
-		accessory.Name = storeItem.Name;
+		accessory.Name = name;
 
 		mesh.LocalPosition = new Vector3(0, -10.7f, 0);
-
-		string? accessoryType = storeItem.AccessoryType;
 
 		if (accessoryType == "backAccessory" || accessoryType == "frontAccessory" || accessoryType == "waistAccessory")
 		{
@@ -174,10 +192,10 @@ public sealed partial class InsertService : Instance
 	public async Task<Tool?> ToolAsync(int id, string? directMeshUrl = null)
 	{
 		APIStoreItem storeItem = await GetStoreItemCachedAsync(id);
-		return BuildTool(id, storeItem.Name, directMeshUrl);
+		return CreateTool(id, storeItem.Name, directMeshUrl);
 	}
 
-	public Tool BuildTool(int id, string name, string? directMeshUrl = null)
+	internal Tool CreateTool(int id, string name, string? directMeshUrl = null)
 	{
 		PTMeshAsset meshAsset = New<PTMeshAsset>();
 		meshAsset.DirectURL = directMeshUrl ?? "";

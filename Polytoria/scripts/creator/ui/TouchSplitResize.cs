@@ -4,147 +4,99 @@
 
 using Godot;
 using Polytoria.Shared;
-using System.Collections.Generic;
+using System.Linq;
 
 namespace Polytoria.Creator.UI;
 
 public sealed partial class TouchSplitResize : Node
 {
-	private const float GrabZone = 24f;
-	private const float CancelMove = 16f;
-	private const ulong HoldMs = 300;
+	private const int GrabThickness = 28;
+	private static readonly Color HighlightColor = new(0.35f, 0.6f, 1f, 0.55f);
 
-	private readonly List<SplitContainer> _splits = [];
-	private SplitContainer? _candidate;
-	private SplitContainer? _active;
-	private ulong _pressTime;
-	private Vector2 _pressLocal;
-	private Vector2 _lastLocal;
+	private ColorRect? _highlight;
 
-	private static bool Enabled => Globals.IsMobileBuild || DisplayServer.IsTouchscreenAvailable();
-
-	private void Rescan()
+	public override void _Ready()
 	{
-		_splits.Clear();
-		Collect(GetTree().Root);
-	}
-
-	private void Collect(Node node)
-	{
-		foreach (Node child in node.GetChildren())
-		{
-			if (child is SplitContainer sc) _splits.Add(sc);
-			Collect(child);
-		}
-	}
-
-	private static (Control?, Control?) Panes(SplitContainer sc)
-	{
-		Control? a = null;
-		Control? b = null;
-		foreach (Node c in sc.GetChildren())
-		{
-			if (c is Control ctrl && ctrl.Visible)
-			{
-				if (a == null) a = ctrl;
-				else { b = ctrl; break; }
-			}
-		}
-		return (a, b);
-	}
-
-	private SplitContainer? HitTest()
-	{
-		SplitContainer? best = null;
-		float bestDist = GrabZone;
-
-		foreach (SplitContainer sc in _splits)
-		{
-			if (!GodotObject.IsInstanceValid(sc) || !sc.IsVisibleInTree()) continue;
-			(Control? a, Control? b) = Panes(sc);
-			if (a == null || b == null) continue;
-
-			Vector2 m = sc.GetLocalMousePosition();
-			Vector2 size = sc.Size;
-			if (m.X < 0 || m.Y < 0 || m.X > size.X || m.Y > size.Y) continue;
-
-			bool vertical = sc is VSplitContainer;
-			float line = vertical ? a.Position.Y + a.Size.Y : a.Position.X + a.Size.X;
-			float dist = Mathf.Abs((vertical ? m.Y : m.X) - line);
-
-			if (dist < bestDist)
-			{
-				bestDist = dist;
-				best = sc;
-			}
-		}
-
-		return best;
-	}
-
-	public override void _Input(InputEvent @event)
-	{
-		if (!Enabled) return;
-
-		if (@event is InputEventMouseButton btn && btn.ButtonIndex == MouseButton.Left)
-		{
-			if (btn.Pressed)
-			{
-				if (_splits.Count == 0) Rescan();
-				_candidate = HitTest();
-				_active = null;
-				if (_candidate != null)
-				{
-					_pressLocal = _candidate.GetLocalMousePosition();
-					_pressTime = Time.GetTicksMsec();
-				}
-			}
-			else
-			{
-				if (_active != null) GetViewport().SetInputAsHandled();
-				_candidate = null;
-				_active = null;
-				Globals.DockResizing = false;
-			}
-		}
-		else if (@event is InputEventMouseMotion)
-		{
-			if (_active != null)
-			{
-				Vector2 cur = _active.GetLocalMousePosition();
-				Vector2 d = cur - _lastLocal;
-				_lastLocal = cur;
-				_active.SplitOffset += Mathf.RoundToInt(_active is VSplitContainer ? d.Y : d.X);
-				GetViewport().SetInputAsHandled();
-			}
-			else if (_candidate != null && _candidate.GetLocalMousePosition().DistanceTo(_pressLocal) > CancelMove)
-			{
-				_candidate = null;
-			}
-		}
+		GetTree().NodeAdded += OnNodeAdded;
+		Hook(GetTree().Root);
 	}
 
 	public override void _ExitTree()
 	{
+		GetTree().NodeAdded -= OnNodeAdded;
+		ClearHighlight();
 		Globals.DockResizing = false;
 	}
 
-	public override void _Process(double delta)
+	private void OnNodeAdded(Node node)
 	{
-		if (_active != null || _candidate == null) return;
-		if (Time.GetTicksMsec() - _pressTime < HoldMs) return;
+		if (node is SplitContainer sc) Setup(sc);
+	}
 
-		Vector2 cur = _candidate.GetLocalMousePosition();
-		if (cur.DistanceTo(_pressLocal) <= CancelMove)
+	private void Hook(Node node)
+	{
+		if (node is SplitContainer sc) Setup(sc);
+		foreach (Node child in node.GetChildren())
 		{
-			_active = _candidate;
-			_lastLocal = cur;
-			Globals.DockResizing = true;
-			if (Globals.IsMobileBuild) Input.VibrateHandheld(40);
+			Hook(child);
 		}
-		else
+	}
+
+	private void Setup(SplitContainer sc)
+	{
+		if (sc.HasMeta("touch_split")) return;
+		sc.SetMeta("touch_split", true);
+		sc.AddThemeConstantOverride("minimum_grab_thickness", GrabThickness);
+		sc.DragStarted += () => OnDragStarted(sc);
+		sc.DragEnded += OnDragEnded;
+	}
+
+	private void OnDragStarted(SplitContainer sc)
+	{
+		Globals.DockResizing = true;
+		if (Globals.IsMobileBuild) Input.VibrateHandheld(20);
+
+		ClearHighlight();
+		Control? dragger = FindDragger(sc);
+		if (dragger == null) return;
+
+		_highlight = new ColorRect
 		{
-			_candidate = null;
+			Color = HighlightColor,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		dragger.AddChild(_highlight, @internal: InternalMode.Back);
+		_highlight.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
+	}
+
+	private void OnDragEnded()
+	{
+		Globals.DockResizing = false;
+		ClearHighlight();
+	}
+
+	private static Control? FindDragger(SplitContainer sc)
+	{
+		var regular = sc.GetChildren().ToHashSet();
+		Control? best = null;
+		float bestDist = float.MaxValue;
+		foreach (Node child in sc.GetChildren(true))
+		{
+			if (regular.Contains(child) || child is not Control c || !c.Visible) continue;
+			Rect2 rect = c.GetGlobalRect();
+			float dist = rect.GetCenter().DistanceTo(c.GetGlobalMousePosition());
+			if (rect.Grow(GrabThickness).HasPoint(c.GetGlobalMousePosition()) && dist < bestDist)
+			{
+				best = c;
+				bestDist = dist;
+			}
 		}
+		return best;
+	}
+
+	private void ClearHighlight()
+	{
+		if (_highlight != null && IsInstanceValid(_highlight)) _highlight.QueueFree();
+		_highlight = null;
 	}
 }

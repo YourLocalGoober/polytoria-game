@@ -65,14 +65,7 @@ public sealed partial class CreatorService : Node, IScriptObject
 
 		try
 		{
-			string docs;
-			try { docs = System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments); }
-			catch { docs = ""; }
-			if (string.IsNullOrEmpty(docs))
-			{
-				docs = ProjectSettings.GlobalizePath("user://");
-			}
-			string polyFolder = Path.Join(docs, PolytoriaFolderName);
+			string polyFolder = Path.Join(DocumentsFolder, PolytoriaFolderName);
 			if (!Directory.Exists(polyFolder))
 			{
 				Directory.CreateDirectory(polyFolder);
@@ -82,6 +75,33 @@ public sealed partial class CreatorService : Node, IScriptObject
 		{
 			PT.PrintErr($"CreatorService: failed to ensure documents folder: {ex}");
 		}
+	}
+
+	public static string DocumentsFolder
+	{
+		get
+		{
+			string docs = "";
+			try
+			{
+				if (!Globals.IsMobileBuild)
+				{
+					docs = System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments);
+				}
+				else if (HasAllFilesAccess())
+				{
+					docs = OS.GetSystemDir(OS.SystemDir.Documents);
+				}
+			}
+			catch { }
+			return string.IsNullOrEmpty(docs) ? ProjectSettings.GlobalizePath("user://") : docs;
+		}
+	}
+
+	public static bool HasAllFilesAccess()
+	{
+		if (!Engine.HasSingleton("PolytoriaPermissions")) return false;
+		return (bool)Engine.GetSingleton("PolytoriaPermissions").Call("hasAllFilesAccess");
 	}
 
 	public override void _Ready()
@@ -559,23 +579,40 @@ public sealed partial class CreatorService : Node, IScriptObject
 
 		LocalTestIDToSession.Add(debugID, session);
 		SessionToLocalTestID.Add(session, debugID);
-		await StartLocalTestOnEntry(session.ProjectFolderPath, game.WorldFilePath!, debugID, GD.RandRange(20000, 30000), false, atCamera ? game.CreatorContext.Freelook.Position : null);
+		await StartLocalTestOnEntry(
+			session.ProjectFolderPath,
+			game.WorldFilePath!,
+			debugID,
+			GD.RandRange(20000, 30000),
+			false,
+			atCamera ? game.CreatorContext.Freelook.Position : null,
+			atCamera ?
+				Mathf.RadToDeg(Mathf.Atan2(game.CreatorContext.Freelook.Forward.X, game.CreatorContext.Freelook.Forward.Z))
+				: null
+			);
 
 		DebugConsole.Singleton.Clear();
+
+		if (Globals.IsMobileBuild)
+		{
+			CleanupLocalTest();
+			return;
+		}
+
 		LocalTestStarted.Invoke();
 	}
 
-	public async Task StartLocalTestOnEntry(string projectPath, string entryPath, string debugID, int port, bool isSubplace, Vector3? spawnPos = null)
+	public async Task StartLocalTestOnEntry(string projectPath, string entryPath, string debugID, int port, bool isSubplace, Vector3? spawnPos = null, float? spawnRot = null)
 	{
 		string tempPath = Path.GetTempPath();
 		string placeFilePath = tempPath.PathJoin("pt_test_" + new DateTimeOffset(DateTime.Now).Millisecond + ".zip");
 
 		await PackedFormat.PackProjectToFile(projectPath, placeFilePath, Interface.LoadOverlay.CreateProgressReporter("Starting local test..."), System.IO.Compression.CompressionLevel.NoCompression);
 		Interface.LoadOverlay?.Hide();
-		StartLocalTestServer(placeFilePath, entryPath, debugID, port, isSubplace, spawnPos);
+		StartLocalTestServer(placeFilePath, entryPath, debugID, port, isSubplace, spawnPos, spawnRot);
 	}
 
-	private void StartLocalTestServer(string placeFilePath, string entryPath, string debugID, int port, bool isSubplace = false, Vector3? spawnPos = null)
+	private void StartLocalTestServer(string placeFilePath, string entryPath, string debugID, int port, bool isSubplace = false, Vector3? spawnPos = null, float? spawnRot = null)
 	{
 		if (Globals.IsMobileBuild)
 		{
@@ -593,6 +630,10 @@ public sealed partial class CreatorService : Node, IScriptObject
 				Interface.PopupAlert($"Client test failed! Can't access storage. Grant 'All files access' to the Creator in settings.");
 				return;
 			}
+			finally
+			{
+				try { File.Delete(placeFilePath); } catch { }
+			}
 
 			Dictionary<string, string?> qparams = new()
 			{
@@ -600,11 +641,14 @@ public sealed partial class CreatorService : Node, IScriptObject
 				["entry"] = entryPath,
 				["debug"] = debugID,
 				["port"] = port.ToString(),
+				["spawnpos"] = spawnPos == null ? null : $"v{(int)spawnPos.Value.X},{(int)spawnPos.Value.Y},{(int)spawnPos.Value.Z}",
+				["spawnrot"] = spawnRot == null ? null : $"v{spawnRot.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)}",
 			};
 			string query = string.Join("&", qparams
 				.Where(kv => !string.IsNullOrEmpty(kv.Value))
 				.Select(kv => $"{kv.Key}={Uri.EscapeDataString(kv.Value!)}"));
 			string uri = $"polytoria://test?{query}";
+			if (OpenInClient(uri)) return;
 			Error err = OS.ShellOpen(uri);
 			if (err != Error.Ok)
 			{
@@ -621,6 +665,10 @@ public sealed partial class CreatorService : Node, IScriptObject
 		if (spawnPos != null)
 		{
 			args.AddRange(["-spawnpos", $"v{(int)spawnPos.Value.X},{(int)spawnPos.Value.Y},{(int)spawnPos.Value.Z}"]);
+		}
+		if (spawnRot != null)
+		{
+			args.AddRange(["-spawnrot", $"v{spawnRot}"]);
 		}
 
 		if (isSubplace)
@@ -659,6 +707,35 @@ public sealed partial class CreatorService : Node, IScriptObject
 		PT.Print("Starting server with args: ", string.Join(" ", args));
 
 		LocalTestProcesses.Add(procID);
+	}
+
+	private const string ClientPackage = "com.polytoriagame.client";
+	private const int FlagActivityNewTask = 0x10000000;
+
+	private static bool OpenInClient(string uri)
+	{
+		if (!Engine.HasSingleton("AndroidRuntime")) return false;
+		try
+		{
+			GodotObject? activity = Engine.GetSingleton("AndroidRuntime").Call("getActivity").AsGodotObject();
+			JavaClass? uriClass = JavaClassWrapper.Wrap("android.net.Uri");
+			JavaClass? intentClass = JavaClassWrapper.Wrap("android.content.Intent");
+			if (activity == null || uriClass == null || intentClass == null) return false;
+
+			GodotObject? data = uriClass.Call("parse", uri).AsGodotObject();
+			GodotObject? intent = intentClass.Call("Intent", "android.intent.action.VIEW", data!).AsGodotObject();
+			if (intent == null) return false;
+
+			intent.Call("setPackage", ClientPackage);
+			intent.Call("addFlags", FlagActivityNewTask);
+			activity.Call("startActivity", intent);
+			return JavaClassWrapper.GetException() == null;
+		}
+		catch (Exception ex)
+		{
+			PT.PrintErr($"Local test: failed to launch {ClientPackage}: {ex.Message}");
+			return false;
+		}
 	}
 
 	public async void StopLocalTest()

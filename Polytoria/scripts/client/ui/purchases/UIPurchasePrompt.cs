@@ -14,14 +14,21 @@ namespace Polytoria.Client.UI.Purchases;
 public partial class UIPurchasePrompt : Control
 {
 	private const float PurchaseDelaySec = 1.25f;
+	private const float PurchaseHoldSec = 1.5f;
+	private const float PurchaseHoldReleaseSec = 0.15f;
 
 	[Export] private Label _purchaseText = null!;
 	[Export] private Label _priceLabel = null!;
 	[Export] private Button _purchaseButton = null!;
+	[Export] private Control _purchaseHoldFill = null!;
+	[Export] private Control _purchaseHoldDarken = null!;
 	[Export] private Button _cancelButton = null!;
 	[Export] private TextureRect _iconRect = null!;
 	[Export] private AnimationPlayer _animPlay = null!;
 	private PTImageAsset? _iconImg;
+	private Tween? _holdTween;
+	private bool _purchaseTriggered;
+	private bool _noticeMode;
 
 	public event Action<bool>? Requested;
 
@@ -29,53 +36,47 @@ public partial class UIPurchasePrompt : Control
 
 	public override void _Ready()
 	{
-		Hook();
+		_purchaseButton.ButtonDown += OnPurchaseHoldStart;
+		_purchaseButton.ButtonUp += OnPurchaseHoldEnd;
+		_cancelButton.Pressed += OnCancel;
 		base._Ready();
-	}
-
-	public override void _EnterTree()
-	{
-		if (IsNodeReady())
-		{
-			Hook();
-		}
-		base._EnterTree();
 	}
 
 	public override void _ExitTree()
 	{
-		Unhook();
+		_iconImg?.ResourceLoaded -= OnIconImgLoaded;
 		base._ExitTree();
 	}
 
-	private bool _hooked;
-
-	private void Hook()
+	private void OnPurchaseHoldStart()
 	{
-		if (_hooked) return;
-		_hooked = true;
-		_purchaseButton.Pressed += OnPurchase;
-		_cancelButton.Pressed += OnCancel;
-		if (_iconImg != null)
-		{
-			_iconImg.ResourceLoaded += OnIconImgLoaded;
-		}
+		_purchaseTriggered = false;
+
+		_holdTween?.Kill();
+		_holdTween = CreateTween();
+		_holdTween.SetParallel(true);
+		_holdTween.TweenProperty(_purchaseHoldFill, "size:x", _purchaseButton.Size.X, PurchaseHoldSec)
+			.From(0f);
+		_holdTween.TweenProperty(_purchaseHoldDarken, "size:x", _purchaseButton.Size.X, PurchaseHoldSec)
+			.From(0f);
+		_holdTween.Chain().TweenCallback(Callable.From(OnPurchaseHoldCompleted));
 	}
 
-	private void Unhook()
+	private void OnPurchaseHoldEnd()
 	{
-		if (!_hooked) return;
-		_hooked = false;
-		_purchaseButton.Pressed -= OnPurchase;
-		_cancelButton.Pressed -= OnCancel;
-		if (_iconImg != null)
-		{
-			_iconImg.ResourceLoaded -= OnIconImgLoaded;
-		}
+		if (_purchaseTriggered)
+			return;
+
+		_holdTween?.Kill();
+		_holdTween = CreateTween();
+		_holdTween.SetParallel(true);
+		_holdTween.TweenProperty(_purchaseHoldFill, "size:x", 0f, PurchaseHoldReleaseSec);
+		_holdTween.TweenProperty(_purchaseHoldDarken, "size:x", 0f, PurchaseHoldReleaseSec);
 	}
 
-	private void OnPurchase()
+	private void OnPurchaseHoldCompleted()
 	{
+		_purchaseTriggered = true;
 		Requested?.Invoke(true);
 		_purchaseButton.Disabled = true;
 		_cancelButton.Disabled = true;
@@ -83,16 +84,42 @@ public partial class UIPurchasePrompt : Control
 
 	private void OnCancel()
 	{
-		Requested?.Invoke(false);
+		if (!_noticeMode)
+		{
+			Requested?.Invoke(false);
+		}
 		Close();
+	}
+
+	public async Task ShowDisabledNotice()
+	{
+		_noticeMode = true;
+		_purchaseText.Text = "In world purchases disabled on mobile!";
+		_holdTween?.Kill();
+		_purchaseButton.Visible = false;
+		_priceLabel.Visible = false;
+		_iconRect.Visible = false;
+		_cancelButton.Disabled = false;
+
+		_animPlay.Play("RESET");
+		await ToSignal(_animPlay, AnimationPlayer.SignalName.AnimationFinished);
+		_animPlay.Play("appear");
 	}
 
 	public async Task Prompt(APIStoreItem item)
 	{
+		_noticeMode = false;
+		_purchaseButton.Visible = true;
+		_priceLabel.Visible = true;
+		_iconRect.Visible = true;
 		_purchaseText.Text = $"Would you like to buy {item.Name}?";
 		_priceLabel.Text = item.Price!.Value.ToString();
 
 		// Reset button state
+		_holdTween?.Kill();
+		_purchaseTriggered = false;
+		_purchaseHoldFill.Size = new Vector2(0f, _purchaseHoldFill.Size.Y);
+		_purchaseHoldDarken.Size = new Vector2(0f, _purchaseHoldDarken.Size.Y);
 		_cancelButton.Disabled = false;
 		_purchaseButton.Disabled = true;
 		_purchaseButton.GrabFocus();
