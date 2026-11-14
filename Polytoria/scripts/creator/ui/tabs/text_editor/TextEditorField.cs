@@ -16,6 +16,13 @@ public sealed partial class TextEditorField : CodeEdit
 
 	private int _currentFontSize = 16;
 
+	private const float TouchDeadzone = 12f;
+	private InputEventMouseButton? _touchPress;
+	private Vector2 _touchStart;
+	private bool _touchScrolling;
+	private bool _touchMinimap;
+	private float _scrollX;
+
 	public override void _Ready()
 	{
 		int size = GetThemeFontSize("font_size", "Label");
@@ -25,6 +32,12 @@ public sealed partial class TextEditorField : CodeEdit
 
 	public override void _GuiInput(InputEvent @event)
 	{
+		if (@event.Device == InputEvent.DeviceIdEmulation && HandleTouch(@event))
+		{
+			AcceptEvent();
+			return;
+		}
+
 		if (@event is InputEventMouseButton mb && mb.Pressed)
 		{
 			if (mb.CtrlPressed && mb.ButtonIndex == MouseButton.WheelUp)
@@ -42,6 +55,83 @@ public sealed partial class TextEditorField : CodeEdit
 		}
 
 		base._GuiInput(@event);
+	}
+
+	private bool HandleTouch(InputEvent @event)
+	{
+		if (@event is InputEventMouseButton mb && mb.ButtonIndex == MouseButton.Left)
+		{
+			if (mb.Pressed)
+			{
+				_touchPress = mb;
+				_touchStart = mb.Position;
+				_touchScrolling = false;
+				_touchMinimap = IsOnMinimap(mb.Position);
+				_scrollX = ScrollHorizontal;
+				if (_touchMinimap)
+				{
+					ScrollToMinimap(mb.Position.Y);
+				}
+				return true;
+			}
+
+			if (_touchPress == null) return false;
+			InputEventMouseButton press = _touchPress;
+			_touchPress = null;
+			if (!_touchScrolling && !_touchMinimap)
+			{
+				Replay(press, mb);
+			}
+			return true;
+		}
+
+		if (@event is InputEventMouseMotion mm && _touchPress != null)
+		{
+			if (_touchMinimap)
+			{
+				ScrollToMinimap(mm.Position.Y);
+				return true;
+			}
+			if (!_touchScrolling && mm.Position.DistanceTo(_touchStart) < TouchDeadzone) return true;
+			_touchScrolling = true;
+			ScrollVertical -= mm.Relative.Y / GetLineHeight();
+			_scrollX = Mathf.Max(0, _scrollX - mm.Relative.X);
+			ScrollHorizontal = (int)_scrollX;
+			return true;
+		}
+
+		return false;
+	}
+
+	private bool IsOnMinimap(Vector2 position)
+	{
+		if (!MinimapDraw) return false;
+		VScrollBar bar = GetVScrollBar();
+		float right = Size.X - (bar.Visible ? bar.Size.X : 0);
+		return position.X >= right - MinimapWidth && position.X < right;
+	}
+
+	private void ScrollToMinimap(float y)
+	{
+		VScrollBar bar = GetVScrollBar();
+		double max = Mathf.Max(0, bar.MaxValue - bar.Page);
+		ScrollVertical = Mathf.Clamp(y / Size.Y, 0, 1) * max;
+	}
+
+	private void Replay(InputEventMouseButton press, InputEventMouseButton release)
+	{
+		Viewport viewport = GetViewport();
+		InputEventMouseButton down = (InputEventMouseButton)press.Duplicate();
+		InputEventMouseButton up = (InputEventMouseButton)release.Duplicate();
+		down.Device = 0;
+		up.Device = 0;
+		down.Position = down.GlobalPosition;
+		up.Position = up.GlobalPosition;
+		Callable.From(() =>
+		{
+			viewport.PushInput(down, true);
+			viewport.PushInput(up, true);
+		}).CallDeferred();
 	}
 
 	public override void _ConfirmCodeCompletion(bool replace)

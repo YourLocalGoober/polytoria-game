@@ -4,6 +4,7 @@
 
 using Godot;
 using Polytoria.Datamodel.Creator;
+using Polytoria.Shared;
 
 namespace Polytoria.Creator.UI.Menus;
 
@@ -24,6 +25,7 @@ public partial class PlayOptionsMenu : Control
 		_playerCountOption.ItemSelected += OnPlayerCountSelected;
 		_playerCountOption.Select(0);
 		_playerCountOption.Text = _playerCountOption.GetItemId(0).ToString();
+		_playerCountOption.Visible = !Globals.IsMobileBuild;
 
 		CreatorService.Singleton.LocalTestStarted.Connect(OnLocalTestStarted);
 		CreatorService.Singleton.LocalTestStopped.Connect(OnLocalTestStopped);

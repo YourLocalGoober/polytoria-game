@@ -1656,6 +1656,8 @@ public partial class NetworkedObject : IScriptObject
 		return string.IsNullOrEmpty(NetworkedObjectID) ? NetworkPath : "i:" + NetworkedObjectID;
 	}
 
+	internal bool IsSoloHost => Globals.IsMobileBuild && Root != null && Root.Network != null && Root.Network.IsServer && Root.Entry != null && Root.Entry.IsSoloTest;
+
 	public void RpcId(int id, string methodName, params object?[]? args)
 	{
 		RpcDispatchEntry entry = RpcDispatchRegistry.GetEntry(GetType(), methodName, out int methodId);

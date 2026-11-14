@@ -257,6 +257,11 @@ public sealed partial class ClientEntry : Node3D
 		}
 #endif
 
+		if (Globals.IsMobileBuild && IsSoloTest)
+		{
+			Globals.BeforeQuit += OpenCreator;
+		}
+
 		if (debugAddress != null)
 		{
 			DebugAgent = new();
@@ -678,6 +683,12 @@ public sealed partial class ClientEntry : Node3D
 			return;
 		}
 
+		if (Globals.IsMobileBuild && IsSoloTest)
+		{
+			Globals.Singleton.Quit();
+			return;
+		}
+
 		Globals.AppEntryEnum target;
 		if (Globals.ReturnEntryAfterLeave is Globals.AppEntryEnum retEntry)
 		{
@@ -691,6 +702,25 @@ public sealed partial class ClientEntry : Node3D
 				: Globals.AppEntryEnum.MobileUI;
 		}
 		Globals.Singleton.SwitchEntry(target);
+	}
+
+	private const string CreatorPackage = "com.polytoriagame.creator";
+
+	private static void OpenCreator()
+	{
+		if (!Engine.HasSingleton("AndroidRuntime")) return;
+		try
+		{
+			GodotObject? activity = Engine.GetSingleton("AndroidRuntime").Call("getActivity").AsGodotObject();
+			GodotObject? packages = activity?.Call("getPackageManager").AsGodotObject();
+			GodotObject? intent = packages?.Call("getLaunchIntentForPackage", CreatorPackage).AsGodotObject();
+			if (activity == null || intent == null) return;
+			activity.Call("startActivity", intent);
+		}
+		catch (Exception ex)
+		{
+			PT.PrintErr($"Failed to open: {ex.Message}");
+		}
 	}
 
 	public void LocalTestStartClient(int port = 24221)

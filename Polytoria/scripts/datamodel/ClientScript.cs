@@ -29,7 +29,7 @@ public sealed partial class ClientScript : Script
 
 	internal void CheckSource()
 	{
-		if (!Root.Network.IsServer)
+		if (!Root.Network.IsServer || IsSoloHost)
 		{
 			if (!Root.IsLoaded)
 			{
@@ -39,7 +39,7 @@ public sealed partial class ClientScript : Script
 					Root.ClientScriptRunDispatch += OnRunDispatch;
 				}
 			}
-			else if (Source == "")
+			else if (Source == "" && !Root.Network.IsServer)
 			{
 				RequestSource();
 			}

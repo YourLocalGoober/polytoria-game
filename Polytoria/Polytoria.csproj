@@ -68,6 +68,8 @@
 		<None Include="native/Luau.Compiler/linux/Luau.Compiler.so" Link="Luau.Compiler.so" Condition="'$(GodotTargetPlatform)' == 'linuxbsd'" CopyToOutputDirectory="Always" />
 		<None Include="native/Luau.Compiler/android/libLuau.Compiler.so" Link="libLuau.Compiler.so" Condition="'$(GodotTargetPlatform)' == 'android'" CopyToOutputDirectory="Always" />
 
+		<None Include="native/luau-lsp/android/libluau-lsp.so" Link="libluau-lsp.so" Condition="'$(GodotTargetPlatform)' == 'android' And '$(IsCreator)' == 'true'" CopyToOutputDirectory="Always" />
+
 		<!-- Discord Game SDK -->
 		<None Include="native/discord/windows/discord_game_sdk.dll" Link="discord_game_sdk.dll" Condition="'$(GodotTargetPlatform)' == 'windows'" CopyToOutputDirectory="Always" />
 		<None Include="native/discord/macos/discord_game_sdk.dylib" Link="discord_game_sdk.dylib" Condition="'$(GodotTargetPlatform)' == 'macos'" CopyToOutputDirectory="Always" />

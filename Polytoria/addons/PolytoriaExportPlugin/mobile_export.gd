@@ -27,6 +27,10 @@ func _supports_platform(platform) -> bool:
 	return false
 
 
+func _get_android_manifest_element_contents(platform, debug) -> String:
+	return "<queries><package android:name=\"com.polytoriagame.client\" /><package android:name=\"com.polytoriagame.creator\" /></queries>"
+
+
 func _get_export_options_overrides(platform) -> Dictionary:
 	return {
 		"dotnet/android_use_linux_bionic": true,

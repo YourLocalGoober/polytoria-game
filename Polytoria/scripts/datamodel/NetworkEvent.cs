@@ -51,7 +51,7 @@ public sealed partial class NetworkEvent : Instance
 	[ScriptMethod]
 	public void InvokeServer(NetMessage? msg = null, object? _ = null)
 	{
-		if (Root.Network.IsServer) throw new System.InvalidOperationException("InvokeServer can only be called from client");
+		if (Root.Network.IsServer && !IsSoloHost) throw new System.InvalidOperationException("InvokeServer can only be called from client");
 		msg ??= new();
 
 		if (Reliable)
@@ -106,39 +106,44 @@ public sealed partial class NetworkEvent : Instance
 		{
 			Rpc(nameof(NetClientRecvMsgUnreliable), msg.Serialize());
 		}
+
+		if (IsSoloHost)
+		{
+			RecvMsg(msg.Serialize(), Root.Network.LocalPeerID, false);
+		}
 	}
 
 	[NetRpc(AuthorityMode.Authority, TransferMode = TransferMode.Reliable)]
 	private void NetClientRecvMsg(byte[] rawdata)
 	{
-		RecvMsg(rawdata, RemoteSenderId);
+		RecvMsg(rawdata, RemoteSenderId, false);
 	}
 
 	[NetRpc(AuthorityMode.Authority, TransferMode = TransferMode.UnreliableOrdered)]
 	private void NetClientRecvMsgUnreliable(byte[] rawdata)
 	{
-		RecvMsg(rawdata, RemoteSenderId);
+		RecvMsg(rawdata, RemoteSenderId, false);
 	}
 
 	[NetRpc(AuthorityMode.Any, TransferMode = TransferMode.Reliable)]
 	private void NetServerRecvMsg(byte[] rawdata)
 	{
-		RecvMsg(rawdata, RemoteSenderId);
+		RecvMsg(rawdata, RemoteSenderId, true);
 	}
 
 	[NetRpc(AuthorityMode.Any, TransferMode = TransferMode.UnreliableOrdered)]
 	private void NetServerRecvMsgUnreliable(byte[] rawdata)
 	{
-		RecvMsg(rawdata, RemoteSenderId);
+		RecvMsg(rawdata, RemoteSenderId, true);
 	}
 
-	private async void RecvMsg(byte[] rawdata, int sentBy)
+	private async void RecvMsg(byte[] rawdata, int sentBy, bool toServer)
 	{
 		try
 		{
 			NetMessage msg = await NetMessage.Deserialize(rawdata);
 
-			if (Root.Network.IsServer)
+			if (Root.Network.IsServer && (toServer || !IsSoloHost))
 			{
 				Player? plr = Root.Players.GetPlayerFromPeerID(sentBy);
 				if (plr != null)

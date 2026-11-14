@@ -483,6 +483,7 @@ public sealed partial class NetworkService : Instance
 
 		_players.SetLocalPlayer(plr);
 		_players.InvokePlayerAdded(plr);
+		Root.DispatchClientScriptRun();
 
 		return plr;
 	}

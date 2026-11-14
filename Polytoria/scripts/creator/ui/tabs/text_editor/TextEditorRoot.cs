@@ -97,6 +97,28 @@ public partial class TextEditorRoot : Node
 
 		CodeEditor.GuiInput += OnCodeEditGUIInput;
 
+		Button saveButton = new()
+		{
+			Text = "Save",
+			Icon = GD.Load<Texture2D>("res://assets/textures/ui-icons/save.svg"),
+			CustomMinimumSize = new Vector2(0, 28),
+			FocusMode = Control.FocusModeEnum.None,
+		};
+		Color textColor = _statusBar.GetThemeColor("font_color");
+		saveButton.AddThemeFontSizeOverride("font_size", _statusBar.GetThemeFontSize("font_size"));
+		saveButton.AddThemeColorOverride("font_color", textColor);
+		saveButton.AddThemeColorOverride("font_hover_color", textColor);
+		saveButton.AddThemeColorOverride("font_pressed_color", textColor);
+		saveButton.AddThemeColorOverride("icon_normal_color", textColor);
+		saveButton.AddThemeColorOverride("icon_hover_color", textColor);
+		saveButton.AddThemeColorOverride("icon_pressed_color", textColor);
+		saveButton.AddThemeConstantOverride("icon_max_width", 18);
+		_statusBar.AddChild(saveButton);
+		saveButton.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.CenterRight, Control.LayoutPresetMode.Minsize, 4);
+		saveButton.GrowHorizontal = Control.GrowDirection.Begin;
+		saveButton.GrowVertical = Control.GrowDirection.Both;
+		saveButton.Pressed += async () => await Save();
+
 		CodeEditor.GuttersDrawLineNumbers = true;
 
 		CodeEditor.AddGutter(0);
@@ -224,10 +246,6 @@ public partial class TextEditorRoot : Node
 		{
 			CodeEditor.AcceptEvent();
 			await Save();
-			Saved = true;
-			SavedChanged?.Invoke(true);
-
-			CreatorService.Interface.StatusBar?.SetStatus("Text file saved to " + Container.TargetFilePath + " at " + DateTime.Now.ToString("HH:mm:ss"));
 		}
 		else if (@event.IsActionPressed("textedit_find") || @event.IsActionPressed("textedit_replace"))
 		{
@@ -296,6 +314,10 @@ public partial class TextEditorRoot : Node
 		}
 
 		File.WriteAllText(Container.TargetFilePathAbsolute, CodeEditor.Text);
+		Saved = true;
+		SavedChanged?.Invoke(true);
+
+		CreatorService.Interface.StatusBar?.SetStatus("Text file saved to " + Container.TargetFilePath + " at " + DateTime.Now.ToString("HH:mm:ss"));
 	}
 
 	private async void OnCodeEditTextChanged()

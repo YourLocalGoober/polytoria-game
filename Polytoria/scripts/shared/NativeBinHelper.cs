@@ -4,6 +4,7 @@
 using Godot;
 using Polytoria.Utils;
 using System;
+using System.IO;
 using System.Runtime.InteropServices;
 
 namespace Polytoria.Shared;
@@ -51,6 +52,13 @@ public static partial class NativeBinHelper
 
 	internal static string ResolveLuauLspBinPath()
 	{
+		if (OS.HasFeature("android"))
+		{
+			string androidPath = Path.Join(AndroidLibDir(), "libluau-lsp.so");
+			if (!File.Exists(androidPath)) throw new Exception("Unsupported platform for luau-lsp");
+			return androidPath;
+		}
+
 		string basePath;
 		string? exeName = null;
 
@@ -87,6 +95,17 @@ public static partial class NativeBinHelper
 		string exePath = basePath.PathJoin(exeName);
 		string exePathGlobal = ProjectSettings.GlobalizePath(exePath).SanitizePath();
 		return exePathGlobal;
+	}
+
+	private static string AndroidLibDir()
+	{
+		foreach (string line in File.ReadLines("/proc/self/maps"))
+		{
+			int start = line.IndexOf('/');
+			if (start >= 0 && line.EndsWith("/libgodot_android.so"))
+				return Path.GetDirectoryName(line[start..])!;
+		}
+		throw new Exception("Android native library directory not found");
 	}
 
 	internal static string ResolveStyLuaBinPath()
